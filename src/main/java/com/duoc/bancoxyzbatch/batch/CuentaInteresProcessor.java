@@ -1,8 +1,10 @@
 package com.duoc.bancoxyzbatch.batch;
 
-import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.batch.infrastructure.item.ItemProcessor;
 import org.springframework.stereotype.Component;
 
@@ -12,7 +14,8 @@ import com.duoc.bancoxyzbatch.model.CuentaInteresCsv;
 @Component
 public class CuentaInteresProcessor implements ItemProcessor<CuentaInteresCsv, CuentaInteresEntity> {
 
-    // tasas de interés mensual de ejemplo según tipo de cuenta
+    private static final Logger log = LoggerFactory.getLogger(CuentaInteresProcessor.class);
+
     private static final double TASA_AHORRO = 0.02;
     private static final double TASA_PRESTAMO = 0.05;
     private static final double TASA_HIPOTECA = 0.04;
@@ -20,8 +23,8 @@ public class CuentaInteresProcessor implements ItemProcessor<CuentaInteresCsv, C
     private static final int EDAD_MINIMA = 18;
     private static final int EDAD_MAXIMA = 100;
 
-    // detecta cuentas con datos idénticos (nombre+saldo+edad+tipo repetidos)
-    private final Set<String> clavesVistas = new HashSet<>();
+    // set concurrente: el step corre en 3 hilos en paralelo
+    private final Set<String> clavesVistas = ConcurrentHashMap.newKeySet();
 
     @Override
     public CuentaInteresEntity process(CuentaInteresCsv item) {
@@ -29,30 +32,29 @@ public class CuentaInteresProcessor implements ItemProcessor<CuentaInteresCsv, C
         entity.setCuentaId(item.getCuentaId());
         entity.setNombre(item.getNombre());
         entity.setEdad(item.getEdad());
-        entity.setTipo(item.getTipo());
 
-        // saldo vacío/nulo -> se trata como 0 para no romper el cálculo
+        String tipo = item.getTipo() != null ? item.getTipo().trim().toLowerCase() : "";
+        entity.setTipo(tipo);
+
         double saldoInicial = item.getSaldo() != null ? item.getSaldo() : 0.0;
         entity.setSaldoInicial(saldoInicial);
 
-        double tasa = switch (item.getTipo() != null ? item.getTipo().toLowerCase() : "") {
+        double tasa = switch (tipo) {
             case "ahorro" -> TASA_AHORRO;
             case "prestamo" -> TASA_PRESTAMO;
             case "hipoteca" -> TASA_HIPOTECA;
-            default -> 0.0;
+            default -> throw new DatoInvalidoException(
+                    "Tipo de cuenta no reconocido '" + tipo + "' para cuenta " + item.getCuentaId());
         };
         entity.setSaldoFinal(saldoInicial + (saldoInicial * tasa));
 
-        // -- validaciones de calidad de datos (quedan registradas en logs de consola) --
         if (item.getEdad() == null || item.getEdad() < EDAD_MINIMA || item.getEdad() > EDAD_MAXIMA) {
-            System.out.println("Anomalía: edad fuera de rango para cuenta " + item.getCuentaId()
-                    + " (edad=" + item.getEdad() + ")");
+            log.warn("Anomalia: edad fuera de rango para cuenta {} (edad={})", item.getCuentaId(), item.getEdad());
         }
 
-        String clave = item.getNombre() + "|" + item.getSaldo() + "|" + item.getEdad() + "|" + item.getTipo();
+        String clave = item.getNombre() + "|" + item.getSaldo() + "|" + item.getEdad() + "|" + tipo;
         if (!clavesVistas.add(clave)) {
-            System.out.println("Anomalía: posible cuenta duplicada -> " + item.getNombre()
-                    + " (cuenta " + item.getCuentaId() + ")");
+            log.warn("Anomalia: posible cuenta duplicada -> {} (cuenta {})", item.getNombre(), item.getCuentaId());
         }
 
         return entity;

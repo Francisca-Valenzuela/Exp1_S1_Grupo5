@@ -35,14 +35,38 @@ src/main/java/com/duoc/bancoxyzbatch/
 
 Cada Job sigue el patrón estándar de Spring Batch: **ItemReader** (lee el CSV) → **ItemProcessor** (valida, transforma y detecta anomalías) → **ItemWriter** (persiste en PostgreSQL).
 
+> **Nota de implementación:** los beans `*Reader` exponen un `SynchronizedItemStreamReader<X>` (necesario para lectura thread-safe con 3 hilos). Los `*JobConfig` inyectan ese reader directamente como `ItemStreamReader<X>` y lo usan tal cual en `.reader(...)`, sin volver a envolverlo — evita el error `No qualifying bean of type 'FlatFileItemReader'` que aparece si se inyecta el tipo equivocado o se envuelve el reader dos veces.
+
 ## Manejo de errores
 
 Cada `Step` está configurado con `faultTolerant()`:
-- **Skip**: los registros con datos irrecuperables (ej. fechas con formato irreconocible) se omiten sin detener el Job completo, hasta un límite de 10 por ejecución (`skipLimit`).
-- **Retry**: ante fallos transitorios de conexión a la base de datos, se reintenta hasta 3 veces (`retryLimit`) antes de fallar.
-- **SkipListener**: cada registro omitido queda registrado en consola con el motivo.
+- **Skip**: los registros con datos irrecuperables (ej. fechas con formato irreconocible) se omiten sin detener el Job completo, hasta un límite de 10 por ejecución (`skipLimit`), gestionado ahora mediante una `CustomSkipPolicy` (ver detalle abajo).
+- **Retry**: ante fallos transitorios de conexión a la base de datos, se reintenta hasta 3 veces (`retryLimit`) con una espera creciente entre intentos (`ExponentialBackOffPolicy`) antes de fallar.
+- **SkipListener**: cada registro omitido queda registrado en el log con el motivo.
 
-Además, cada `ItemProcessor` detecta y reporta en consola anomalías de calidad de datos que no impiden el guardado (montos negativos/cero, duplicados, edades fuera de rango, descripciones faltantes), simulando las validaciones que exige un proceso de migración de un sistema legacy.
+Además, cada `ItemProcessor` detecta y reporta (vía logger) anomalías de calidad de datos que no impiden el guardado (duplicados, edades fuera de rango, etc.), simulando las validaciones que exige un proceso de migración de un sistema legacy. Dos de esas validaciones sí se consideran datos irrecuperables y disparan un skip real (`DatoInvalidoException`), en vez de solo loguear la anomalía:
+
+- `CuentaInteresProcessor`: un `tipo` de cuenta que no sea `ahorro`, `prestamo` o `hipoteca` (ej. `-1`) no tiene una tasa de interés definida, por lo que el registro se omite en vez de guardarse con tasa `0.0`.
+- `CuentaAnualProcessor`: un `monto` nulo o en cero no representa un movimiento real de cuenta, por lo que el registro se omite en vez de guardarse como un movimiento vacío.
+
+En ambos casos, la `CustomSkipPolicy` clasifica la excepción como omisible, el `BatchSkipListener` deja constancia del motivo en el log, y el Job continúa hasta completarse (`COMPLETED`) sin detenerse por estos registros.
+
+## Novedades Semana 2: procesamiento paralelo y optimización de recursos
+
+Esta semana se optimizó la ejecución de los 3 Jobs incorporando procesamiento paralelo, monitoreo y un manejo de errores más robusto, manteniendo el mismo modelo de datos y las mismas validaciones funcionales de la Semana 1:
+
+- **Procesamiento multihilo (3 hilos por Step)**: se agregó `BatchAsyncConfig`, que define un `TaskExecutor` (`ThreadPoolTaskExecutor`) con `corePoolSize`/`maxPoolSize` = 3 y cola de espera de 25 elementos. Este executor se inyecta en el `taskExecutor()` de cada `Step` (`transaccionStep`, `cuentaInteresStep`, `cuentaAnualStep`) para procesar los chunks en paralelo.
+- **Lectura thread-safe**: como los 3 `Reader` (`FlatFileItemReader`) ahora se comparten entre hilos, cada uno se envuelve con `SynchronizedItemStreamReader` (vía `SynchronizedItemStreamReaderBuilder`) para evitar condiciones de carrera al leer el CSV.
+- **Colecciones concurrentes en los `Processor`**: las estructuras usadas para detectar duplicados (`clavesVistas` en `TransaccionProcessor` y `CuentaInteresProcessor`) pasaron de `HashSet` a `ConcurrentHashMap.newKeySet()`, ya que ahora reciben escrituras simultáneas desde varios hilos.
+- **`CustomSkipPolicy` centralizada**: reemplaza los `.skip(Clase.class)` sueltos de cada Step. Solo omite errores esperables de calidad de datos (`DatoInvalidoException`, `FlatFileParseException`); cualquier otro error (ej. de infraestructura) detiene el Step en vez de omitirse a ciegas.
+- **Listeners de monitoreo** (nuevos, en `batch/`):
+  - `BatchJobListener`: registra inicio/fin de cada Job y su duración total.
+  - `BatchStepListener`: registra inicio/fin de cada Step, hilo de ejecución, cantidad de registros leídos/escritos/omitidos y duración.
+  - `BatchSkipListener`: registra en el log cada omisión (lectura, procesamiento o escritura) y su causa.
+- **Migración de `System.out.println` a logging con SLF4J** en `BatchRunner` y en los `ItemProcessor`, incluyendo niveles configurados en `application.properties` (`logging.level.com.duoc.bancoxyzbatch=INFO`, `logging.level.org.springframework.batch=INFO`).
+- **Ajuste del pool de conexiones (HikariCP)** en `application.properties` para acompañar el paralelismo: `maximum-pool-size=6`, `minimum-idle=3`, `connection-timeout=30000` (3 hilos batch + margen de conexiones auxiliares).
+- **Mejoras de validación en los `Processor`**: se agrega `trim()` a campos de texto (fecha, tipo, descripción) antes de validarlos y se valida explícitamente que el campo `tipo` de las transacciones sea `debito` o `credito`.
+- **Datos de prueba ampliados**: se agregaron nuevos casos a los CSV de origen (fechas con formato legacy `yyyy/MM/dd`, montos y edades vacíos, tipos inválidos como `invalid` o `-1`, edad límite 100, descripción en blanco) para ejercitar los nuevos mecanismos de skip y las validaciones reforzadas.
 
 ## Tecnologías
 
@@ -71,8 +95,12 @@ docker ps
 Desde la raíz del proyecto:
 
 ```bash
-./mvnw spring-boot:run
+./mvnw clean spring-boot:run
 ```
+
+Se recomienda usar `clean` para evitar errores por clases compiladas de una versión anterior del código (`target/` desactualizado).
+
+> Durante la compilación aparecen `[WARNING]` de deprecación (`JobLauncher`, `chunk(int, PlatformTransactionManager)`, `taskExecutor(...)`). Son advertencias esperadas de Spring Batch 6.x (que reemplaza esas APIs por `JobOperator` y una nueva sintaxis de `StepBuilder`) y no afectan la compilación ni la ejecución del proyecto.
 
 Al iniciar, la aplicación:
 1. Crea automáticamente las tablas (`transacciones_procesadas`, `cuentas_interes`, `cuentas_anuales`) en PostgreSQL.
@@ -88,6 +116,20 @@ Puedes conectarte a la base con cualquier cliente PostgreSQL (DBeaver, pgAdmin, 
 - Base de datos: `bancoxyz`
 - Usuario: `bancoxyz`
 - Contraseña: `bancoxyz123`
+
+Si no tienes el cliente `psql` instalado localmente, puedes usar el que ya viene incluido en el contenedor de Postgres:
+
+```bash
+docker exec -it banco-xyz-postgres psql -U bancoxyz -d bancoxyz
+```
+
+Y luego, dentro de la sesión de `psql`:
+
+```sql
+SELECT * FROM transacciones_procesadas;
+SELECT * FROM cuentas_interes;
+SELECT * FROM cuentas_anuales;
+```
 
 ## Datos de origen
 
