@@ -40,7 +40,7 @@ Cada Job sigue el patrón estándar de Spring Batch: **ItemReader** (lee el CSV)
 ## Manejo de errores
 
 Cada `Step` está configurado con `faultTolerant()`:
-- **Skip**: los registros con datos irrecuperables (ej. fechas con formato irreconocible) se omiten sin detener el Job completo, hasta un límite de 10 por ejecución (`skipLimit`), gestionado ahora mediante una `CustomSkipPolicy` (ver detalle abajo).
+- **Skip**: los registros con datos irrecuperables (ej. fechas con formato irreconocible) se omiten sin detener el Job completo, hasta un límite configurable por Step/partición (`batch.skip-limit`, 300 por defecto — ver Semana 3), gestionado mediante una `CustomSkipPolicy` (ver detalle abajo).
 - **Retry**: ante fallos transitorios de conexión a la base de datos, se reintenta hasta 3 veces (`retryLimit`) con una espera creciente entre intentos (`ExponentialBackOffPolicy`) antes de fallar.
 - **SkipListener**: cada registro omitido queda registrado en el log con el motivo.
 
@@ -68,7 +68,37 @@ Esta semana se optimizó la ejecución de los 3 Jobs incorporando procesamiento 
 - **Mejoras de validación en los `Processor`**: se agrega `trim()` a campos de texto (fecha, tipo, descripción) antes de validarlos y se valida explícitamente que el campo `tipo` de las transacciones sea `debito` o `credito`.
 - **Datos de prueba ampliados**: se agregaron nuevos casos a los CSV de origen (fechas con formato legacy `yyyy/MM/dd`, montos y edades vacíos, tipos inválidos como `invalid` o `-1`, edad límite 100, descripción en blanco) para ejercitar los nuevos mecanismos de skip y las validaciones reforzadas.
 
-## Tecnologías
+## Novedades Semana 3: escalado con particiones (`PartitionStep`)
+
+Esta semana se reemplazó el paralelismo a nivel de *item* (multi-thread dentro de un mismo Step, Semana 2) por paralelismo a nivel de *step*, usando **particiones de Spring Batch**. Además, se incorporó el dataset oficial de la Semana 3 (1000 filas por CSV, con una proporción alta de datos inválidos a propósito), en reemplazo del CSV de prueba reducido de las Semanas 1-2.
+
+### Cómo funciona
+
+- **`LineRangePartitioner`** (`batch/partition/`): cuenta las líneas de datos del CSV (sin el header) y las reparte en rangos según `gridSize`. Cada partición recibe un `ExecutionContext` con `startLine` y `linesToRead`.
+- **Readers step-scoped**: los tres `*Reader` (`TransaccionReader`, `CuentaInteresReader`, `CuentaAnualReader`) pasaron a ser `@StepScope`, inyectando `startLine`/`linesToRead` vía *late binding* (`@Value("#{stepExecutionContext['...']}")`) para que cada partición lea únicamente el tramo del archivo que le corresponde.
+- **Step "manager" + Step "worker"**: cada Job ahora tiene un `...PartitionStep` (manager) que reparte el `...WorkerStep` (worker, el chunk de siempre: reader → processor → writer, con `faultTolerant`, skip y retry) en N particiones ejecutadas en paralelo por `batchTaskExecutor`.
+- **`batch.partition.grid-size`** (`application.properties`): cantidad de particiones por Job, configurable sin tocar código.
+- **`batch.skip-limit`**: el límite de omisiones por Step/partición, que subió de 10 (fijo, calibrado para el CSV de prueba de 9 filas) a un valor configurable (300 por defecto), porque el dataset oficial de 1000 filas trae muchos más registros inválidos a propósito y cada partición tiene su propio contador de skips independiente.
+
+### Comparación de parámetros: buscando el gridSize óptimo
+
+Se ejecutó `cuentaAnualJob` (1000 filas) tres veces, cambiando solo `batch.partition.grid-size`, y se midió la duración total del Job reportada por `BatchJobListener`:
+
+| gridSize | Filas por partición | Duración por partición | Duración total del Job |
+|---|---|---|---|
+| 2 | 500 / 500 | 519 ms, 554 ms | **556 ms** |
+| **3** | ~334 c/u | 350 ms, 364 ms, ~267 ms | **366 ms** ⭐ |
+| 4 | 250 c/u | 259 ms, 260 ms, 283 ms, 237 ms | **500 ms** |
+
+**`gridSize=3` resultó la configuración óptima**, y no por casualidad: `batchTaskExecutor` (definido en la Semana 2, `BatchAsyncConfig`) tiene `corePoolSize`/`maxPoolSize` = **3**, es decir, solo 3 hilos disponibles para ejecutar particiones en paralelo.
+
+- Con `gridSize=2` el pool queda subutilizado (2 de 3 hilos activos) y cada partición carga el doble de filas, aumentando el tiempo por partición.
+- Con `gridSize=3` las 3 particiones corren simultáneamente, una por hilo, logrando el máximo paralelismo real del pool configurado.
+- Con `gridSize=4` la 4ª partición debe esperar a que se libere un hilo (solo hay 3 en el pool), sumando latencia de cola y overhead de coordinación extra sin ninguna ganancia de velocidad.
+
+**Conclusión:** el número óptimo de particiones no es "cuantas más, mejor", sino que debe igualar la capacidad real del `TaskExecutor` subyacente. Por eso `application.properties` quedó con `batch.partition.grid-size=3` como valor final.
+
+
 
 - **Java 21**
 - **Spring Boot 4.1.0** / **Spring Batch 6**
@@ -133,4 +163,4 @@ SELECT * FROM cuentas_anuales;
 
 ## Datos de origen
 
-Los archivos CSV (`src/main/resources/data/`) provienen de [bank_legacy_data](https://github.com/KariVillagran/bank_legacy_data) y simulan un sistema legacy con problemas de calidad de datos intencionales, resueltos por los `ItemProcessor` de este proyecto.
+Los archivos CSV (`src/main/resources/data/`) provienen de [bank_legacy_data](https://github.com/KariVillagran/bank_legacy_data) y simulan un sistema legacy con problemas de calidad de datos intencionales, resueltos por los `ItemProcessor` de este proyecto. Desde la Semana 3 se usa el dataset oficial (1000 filas por archivo), en reemplazo del CSV de prueba reducido (9 filas) de las Semanas 1-2.
