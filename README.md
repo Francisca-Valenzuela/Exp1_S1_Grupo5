@@ -1,10 +1,10 @@
-# Banco XYZ - Migración de Procesos Batch con Spring Batch
+# Banco XYZ - Migración de Procesos Batch con Spring Batch + BFF
 
 ## Objetivo del proyecto
 
-Este proyecto moderniza tres procesos batch legacy del **Banco XYZ** (un banco ficticio) utilizando **Spring Batch**. A partir de datos legacy en formato CSV —con problemas típicos de sistemas antiguos como montos negativos, fechas mal formateadas, registros duplicados y campos vacíos—, se implementan tres Jobs que leen, validan/transforman y persisten la información en una base de datos relacional (PostgreSQL).
+Este proyecto moderniza tres procesos batch legacy del **Banco XYZ** (un banco ficticio) utilizando **Spring Batch**, y expone esos datos a través de un **Backend for Frontend (BFF)** adaptado a tres tipos de cliente: Web, Móvil y Cajero Automático. A partir de datos legacy en formato CSV —con problemas típicos de sistemas antiguos como montos negativos, fechas mal formateadas, registros duplicados y campos vacíos—, se implementan tres Jobs que leen, validan/transforman y persisten la información en PostgreSQL, y luego tres APIs REST independientes exponen esa información de forma personalizada según el canal que la consume.
 
-## Procesos implementados
+## Procesos batch implementados
 
 | Job | Descripción | Fuente de datos |
 |---|---|---|
@@ -27,82 +27,145 @@ src/main/java/com/duoc/bancoxyzbatch/
 │   ├── HelloWorldJobConfig.java    # Job de prueba inicial
 │   ├── TransaccionJobConfig.java   # Job + Step 1
 │   ├── CuentaInteresJobConfig.java # Job + Step 2
-│   └── CuentaAnualJobConfig.java   # Job + Step 3
+│   ├── CuentaAnualJobConfig.java   # Job + Step 3
+│   └── SecurityConfig.java         # Autenticación/autorización por canal BFF (Exp2 S4)
 ├── entity/            # Entidades JPA (tablas destino ya validadas)
 ├── model/              # POJOs de lectura cruda del CSV
-└── repository/          # Repositorios Spring Data JPA
+├── repository/          # Repositorios Spring Data JPA
+└── bff/                 # Backend for Frontend (Exp2 S4) — ver detalle más abajo
+    ├── dto/
+    ├── web/
+    ├── mobile/
+    ├── atm/
+    └── exception/
 ```
 
-Cada Job sigue el patrón estándar de Spring Batch: **ItemReader** (lee el CSV) → **ItemProcessor** (valida, transforma y detecta anomalías) → **ItemWriter** (persiste en PostgreSQL).
+Cada Job de Batch sigue el patrón estándar de Spring Batch: **ItemReader** (lee el CSV) → **ItemProcessor** (valida, transforma y detecta anomalías) → **ItemWriter** (persiste en PostgreSQL).
 
 > **Nota de implementación:** los beans `*Reader` exponen un `SynchronizedItemStreamReader<X>` (necesario para lectura thread-safe con 3 hilos). Los `*JobConfig` inyectan ese reader directamente como `ItemStreamReader<X>` y lo usan tal cual en `.reader(...)`, sin volver a envolverlo — evita el error `No qualifying bean of type 'FlatFileItemReader'` que aparece si se inyecta el tipo equivocado o se envuelve el reader dos veces.
 
-## Manejo de errores
+## Manejo de errores (Batch)
 
 Cada `Step` está configurado con `faultTolerant()`:
-- **Skip**: los registros con datos irrecuperables (ej. fechas con formato irreconocible) se omiten sin detener el Job completo, hasta un límite configurable por Step/partición (`batch.skip-limit`, 300 por defecto — ver Semana 3), gestionado mediante una `CustomSkipPolicy` (ver detalle abajo).
+- **Skip**: los registros con datos irrecuperables (ej. fechas con formato irreconocible) se omiten sin detener el Job completo, hasta un límite configurable por Step/partición (`batch.skip-limit`, 300 por defecto), gestionado mediante una `CustomSkipPolicy`.
 - **Retry**: ante fallos transitorios de conexión a la base de datos, se reintenta hasta 3 veces (`retryLimit`) con una espera creciente entre intentos (`ExponentialBackOffPolicy`) antes de fallar.
 - **SkipListener**: cada registro omitido queda registrado en el log con el motivo.
 
-Además, cada `ItemProcessor` detecta y reporta (vía logger) anomalías de calidad de datos que no impiden el guardado (duplicados, edades fuera de rango, etc.), simulando las validaciones que exige un proceso de migración de un sistema legacy. Dos de esas validaciones sí se consideran datos irrecuperables y disparan un skip real (`DatoInvalidoException`), en vez de solo loguear la anomalía:
+Además, cada `ItemProcessor` detecta y reporta (vía logger) anomalías de calidad de datos que no impiden el guardado (duplicados, edades fuera de rango, etc.). Dos validaciones sí se consideran datos irrecuperables y disparan un skip real (`DatoInvalidoException`):
 
-- `CuentaInteresProcessor`: un `tipo` de cuenta que no sea `ahorro`, `prestamo` o `hipoteca` (ej. `-1`) no tiene una tasa de interés definida, por lo que el registro se omite en vez de guardarse con tasa `0.0`.
-- `CuentaAnualProcessor`: un `monto` nulo o en cero no representa un movimiento real de cuenta, por lo que el registro se omite en vez de guardarse como un movimiento vacío.
-
-En ambos casos, la `CustomSkipPolicy` clasifica la excepción como omisible, el `BatchSkipListener` deja constancia del motivo en el log, y el Job continúa hasta completarse (`COMPLETED`) sin detenerse por estos registros.
+- `CuentaInteresProcessor`: un `tipo` de cuenta que no sea `ahorro`, `prestamo` o `hipoteca` no tiene tasa de interés definida, por lo que el registro se omite.
+- `CuentaAnualProcessor`: un `monto` nulo o en cero no representa un movimiento real, por lo que el registro se omite.
 
 ## Novedades Semana 2: procesamiento paralelo y optimización de recursos
 
-Esta semana se optimizó la ejecución de los 3 Jobs incorporando procesamiento paralelo, monitoreo y un manejo de errores más robusto, manteniendo el mismo modelo de datos y las mismas validaciones funcionales de la Semana 1:
-
-- **Procesamiento multihilo (3 hilos por Step)**: se agregó `BatchAsyncConfig`, que define un `TaskExecutor` (`ThreadPoolTaskExecutor`) con `corePoolSize`/`maxPoolSize` = 3 y cola de espera de 25 elementos. Este executor se inyecta en el `taskExecutor()` de cada `Step` (`transaccionStep`, `cuentaInteresStep`, `cuentaAnualStep`) para procesar los chunks en paralelo.
-- **Lectura thread-safe**: como los 3 `Reader` (`FlatFileItemReader`) ahora se comparten entre hilos, cada uno se envuelve con `SynchronizedItemStreamReader` (vía `SynchronizedItemStreamReaderBuilder`) para evitar condiciones de carrera al leer el CSV.
-- **Colecciones concurrentes en los `Processor`**: las estructuras usadas para detectar duplicados (`clavesVistas` en `TransaccionProcessor` y `CuentaInteresProcessor`) pasaron de `HashSet` a `ConcurrentHashMap.newKeySet()`, ya que ahora reciben escrituras simultáneas desde varios hilos.
-- **`CustomSkipPolicy` centralizada**: reemplaza los `.skip(Clase.class)` sueltos de cada Step. Solo omite errores esperables de calidad de datos (`DatoInvalidoException`, `FlatFileParseException`); cualquier otro error (ej. de infraestructura) detiene el Step en vez de omitirse a ciegas.
-- **Listeners de monitoreo** (nuevos, en `batch/`):
-  - `BatchJobListener`: registra inicio/fin de cada Job y su duración total.
-  - `BatchStepListener`: registra inicio/fin de cada Step, hilo de ejecución, cantidad de registros leídos/escritos/omitidos y duración.
-  - `BatchSkipListener`: registra en el log cada omisión (lectura, procesamiento o escritura) y su causa.
-- **Migración de `System.out.println` a logging con SLF4J** en `BatchRunner` y en los `ItemProcessor`, incluyendo niveles configurados en `application.properties` (`logging.level.com.duoc.bancoxyzbatch=INFO`, `logging.level.org.springframework.batch=INFO`).
-- **Ajuste del pool de conexiones (HikariCP)** en `application.properties` para acompañar el paralelismo: `maximum-pool-size=6`, `minimum-idle=3`, `connection-timeout=30000` (3 hilos batch + margen de conexiones auxiliares).
-- **Mejoras de validación en los `Processor`**: se agrega `trim()` a campos de texto (fecha, tipo, descripción) antes de validarlos y se valida explícitamente que el campo `tipo` de las transacciones sea `debito` o `credito`.
-- **Datos de prueba ampliados**: se agregaron nuevos casos a los CSV de origen (fechas con formato legacy `yyyy/MM/dd`, montos y edades vacíos, tipos inválidos como `invalid` o `-1`, edad límite 100, descripción en blanco) para ejercitar los nuevos mecanismos de skip y las validaciones reforzadas.
+- **Procesamiento multihilo (3 hilos por Step)**: `BatchAsyncConfig` define un `TaskExecutor` (`ThreadPoolTaskExecutor`, `corePoolSize`/`maxPoolSize`=3) inyectado en cada `Step`.
+- **Lectura thread-safe**: los `Reader` se envuelven con `SynchronizedItemStreamReader`.
+- **Colecciones concurrentes** (`ConcurrentHashMap.newKeySet()`) para detección de duplicados entre hilos.
+- **`CustomSkipPolicy` centralizada**, listeners de monitoreo (`BatchJobListener`, `BatchStepListener`, `BatchSkipListener`), logging con SLF4J, y ajuste del pool de HikariCP (`maximum-pool-size=6`).
 
 ## Novedades Semana 3: escalado con particiones (`PartitionStep`)
 
-Esta semana se reemplazó el paralelismo a nivel de *item* (multi-thread dentro de un mismo Step, Semana 2) por paralelismo a nivel de *step*, usando **particiones de Spring Batch**. Además, se incorporó el dataset oficial de la Semana 3 (1000 filas por CSV, con una proporción alta de datos inválidos a propósito), en reemplazo del CSV de prueba reducido de las Semanas 1-2.
+Se reemplazó el paralelismo a nivel de *item* (Semana 2) por paralelismo a nivel de *step*, usando particiones de Spring Batch, e incorporando el dataset oficial de 1000 filas por CSV.
 
-### Cómo funciona
-
-- **`LineRangePartitioner`** (`batch/partition/`): cuenta las líneas de datos del CSV (sin el header) y las reparte en rangos según `gridSize`. Cada partición recibe un `ExecutionContext` con `startLine` y `linesToRead`.
-- **Readers step-scoped**: los tres `*Reader` (`TransaccionReader`, `CuentaInteresReader`, `CuentaAnualReader`) pasaron a ser `@StepScope`, inyectando `startLine`/`linesToRead` vía *late binding* (`@Value("#{stepExecutionContext['...']}")`) para que cada partición lea únicamente el tramo del archivo que le corresponde.
-- **Step "manager" + Step "worker"**: cada Job ahora tiene un `...PartitionStep` (manager) que reparte el `...WorkerStep` (worker, el chunk de siempre: reader → processor → writer, con `faultTolerant`, skip y retry) en N particiones ejecutadas en paralelo por `batchTaskExecutor`.
-- **`batch.partition.grid-size`** (`application.properties`): cantidad de particiones por Job, configurable sin tocar código.
-- **`batch.skip-limit`**: el límite de omisiones por Step/partición, que subió de 10 (fijo, calibrado para el CSV de prueba de 9 filas) a un valor configurable (300 por defecto), porque el dataset oficial de 1000 filas trae muchos más registros inválidos a propósito y cada partición tiene su propio contador de skips independiente.
+- **`LineRangePartitioner`**: reparte las líneas del CSV en rangos según `gridSize`.
+- **Readers `@StepScope`**: cada partición lee únicamente su tramo del archivo.
+- **Step "manager" + Step "worker"** por cada Job, ejecutados en paralelo por `batchTaskExecutor`.
 
 ### Comparación de parámetros: buscando el gridSize óptimo
 
-Se ejecutó `cuentaAnualJob` (1000 filas) tres veces, cambiando solo `batch.partition.grid-size`, y se midió la duración total del Job reportada por `BatchJobListener`:
+| gridSize | Filas por partición | Duración total del Job |
+|---|---|---|
+| 2 | 500 / 500 | 556 ms |
+| **3** | ~334 c/u | **366 ms** ⭐ |
+| 4 | 250 c/u | 500 ms |
 
-| gridSize | Filas por partición | Duración por partición | Duración total del Job |
+**`gridSize=3` resultó óptimo** porque coincide exactamente con `corePoolSize`/`maxPoolSize`=3 del `batchTaskExecutor`: con 2 el pool queda subutilizado, y con 4 la partición extra debe esperar un hilo libre, sumando overhead sin ganancia real. El valor final quedó en `application.properties` como `batch.partition.grid-size=3`.
+
+---
+
+## Novedades Exp2 Semana 4: Backend for Frontend (BFF)
+
+### Objetivo de esta etapa
+
+Exponer los datos ya cargados por los Jobs de Batch (transacciones, cuentas con interés, movimientos anuales) a través de **tres backends independientes**, uno por tipo de cliente: **Web**, **Móvil** y **Cajero Automático**, cada uno con su propia forma de autenticación, su propio conjunto de campos expuestos, y su propia organización de código.
+
+### Estrategia de implementación elegida
+
+Se evaluaron las 3 estrategias de BFF presentadas en la guía (backends independientes por cliente, diseño de endpoints personalizados, y aprovechar microservicios). Se eligió **"Diseño de endpoints personalizados"**: una sola aplicación Spring Boot expone rutas, DTOs y reglas de seguridad distintas por canal (`/api/web/**`, `/api/mobile/**`, `/api/atm/**`), en vez de desplegar tres aplicaciones separadas.
+
+**Por qué esta estrategia y no las otras dos:**
+- *Backends independientes por repositorio/deploy separado* habría triplicado la infraestructura (3 apps, 3 configuraciones de seguridad y base de datos) sin aportar beneficio real para el alcance de esta actividad.
+- *Aprovechar microservicios* no aplica porque el proyecto es un monolito Spring Batch + JPA, no una arquitectura de microservicios.
+- El enunciado pide avanzar "en la continuidad" del proyecto ya existente, lo que refuerza mantener una única aplicación desplegable.
+
+El análisis completo, con la tabla comparativa de las 3 estrategias y la justificación detallada, está en [`Exp2_S4_Analisis_Estrategia_BFF.md`](./Exp2_S4_Analisis_Estrategia_BFF.md).
+
+### Los 3 BFF implementados
+
+| BFF | Endpoint(s) | Rol de seguridad | Qué expone |
 |---|---|---|---|
-| 2 | 500 / 500 | 519 ms, 554 ms | **556 ms** |
-| **3** | ~334 c/u | 350 ms, 364 ms, ~267 ms | **366 ms** ⭐ |
-| 4 | 250 c/u | 259 ms, 260 ms, 283 ms, 237 ms | **500 ms** |
+| **Web** | `GET /api/web/cuentas/{id}`, `GET /api/web/transacciones` | `ROLE_WEB` | Datos completos: `cuentaId`, `nombre`, `edad`, `tipo`, `saldoInicial`, `saldoFinal`, historial completo de movimientos, transacciones con su `anomalia` |
+| **Móvil** | `GET /api/mobile/cuentas/{id}` | `ROLE_MOBILE` | Datos esenciales: `cuentaId`, `nombre`, `saldoActual`, y solo los 5 movimientos más recientes |
+| **Cajero (ATM)** | `GET /api/atm/cuentas/{id}/saldo`, `POST /api/atm/cuentas/{id}/retiro` | `ROLE_ATM` | Mínimo indispensable: `cuentaId` + `saldoDisponible`; el retiro valida saldo suficiente y devuelve `422` con mensaje claro si no lo hay |
 
-**`gridSize=3` resultó la configuración óptima**, y no por casualidad: `batchTaskExecutor` (definido en la Semana 2, `BatchAsyncConfig`) tiene `corePoolSize`/`maxPoolSize` = **3**, es decir, solo 3 hilos disponibles para ejecutar particiones en paralelo.
+### Autenticación y autorización por canal
 
-- Con `gridSize=2` el pool queda subutilizado (2 de 3 hilos activos) y cada partición carga el doble de filas, aumentando el tiempo por partición.
-- Con `gridSize=3` las 3 particiones corren simultáneamente, una por hilo, logrando el máximo paralelismo real del pool configurado.
-- Con `gridSize=4` la 4ª partición debe esperar a que se libere un hilo (solo hay 3 en el pool), sumando latencia de cola y overhead de coordinación extra sin ninguna ganancia de velocidad.
+Se usa **Spring Security con Basic Auth** y un usuario/rol distinto por canal (`SecurityConfig.java`):
 
-**Conclusión:** el número óptimo de particiones no es "cuantas más, mejor", sino que debe igualar la capacidad real del `TaskExecutor` subyacente. Por eso `application.properties` quedó con `batch.partition.grid-size=3` como valor final.
+| Canal | Usuario | Contraseña | Rol requerido |
+|---|---|---|---|
+| Web | `web-client` | `web-secret` | `ROLE_WEB` |
+| Móvil | `mobile-client` | `mobile-secret` | `ROLE_MOBILE` |
+| Cajero | `atm-client` | `atm-secret` | `ROLE_ATM` |
 
+Un cliente autenticado para un canal **no puede** acceder a los endpoints de otro canal (probado: `mobile-client` contra `/api/web/**` responde `403 Forbidden`, y lo mismo en sentido inverso — ver evidencias de ejecución).
 
+### Organización del código (paquete `bff/`)
+
+```
+bff/
+├── dto/          # DTOs específicos por canal, sin reutilizar entre canales
+├── web/          # WebBffController + WebBffService
+├── mobile/       # MobileBffController + MobileBffService
+├── atm/          # AtmBffController + AtmBffService
+└── exception/    # SaldoInsuficienteException + BffExceptionHandler (manejo de errores común)
+```
+
+Los 3 BFF reutilizan las entidades y repositorios ya existentes del proyecto batch (`TransaccionRepository`, `CuentaInteresRepository`, `CuentaAnualRepository`), sumando un único método nuevo: `CuentaAnualRepository.findByCuentaId(Long)`.
+
+### Cómo probar los BFF
+
+Con el proyecto corriendo (ver "Instrucciones para ejecutar" más abajo), usa Postman o `curl` con Basic Auth:
+
+```bash
+# Web (datos completos)
+curl -u web-client:web-secret http://localhost:8080/api/web/cuentas/124
+
+# Móvil (datos livianos)
+curl -u mobile-client:mobile-secret http://localhost:8080/api/mobile/cuentas/124
+
+# Cajero: consulta de saldo
+curl -u atm-client:atm-secret http://localhost:8080/api/atm/cuentas/124/saldo
+
+# Cajero: retiro (Postman recomendado por temas de escapado de comillas en PowerShell)
+# POST /api/atm/cuentas/124/retiro
+# Body raw JSON: {"monto": 2000}
+
+# Aislamiento entre canales (debe dar 403)
+curl -i -u mobile-client:mobile-secret http://localhost:8080/api/web/cuentas/124
+```
+
+Las capturas de cada una de estas pruebas están en `Evidencias.docx`, incluida en esta entrega.
+
+---
+
+## Tecnologías utilizadas
 
 - **Java 21**
 - **Spring Boot 4.1.0** / **Spring Batch 6**
 - **Spring Data JPA** (Hibernate)
+- **Spring Web** (BFF REST — Exp2 S4)
+- **Spring Security** (Basic Auth por canal — Exp2 S4)
 - **PostgreSQL 16** (vía contenedor Docker)
 - **Maven**
 
@@ -112,6 +175,12 @@ Se ejecutó `cuentaAnualJob` (1000 filas) tres veces, cambiando solo `batch.part
 
 ```bash
 docker run --name banco-xyz-postgres -e POSTGRES_DB=bancoxyz -e POSTGRES_USER=bancoxyz -e POSTGRES_PASSWORD=bancoxyz123 -p 5432:5432 -d postgres:16
+```
+
+Si el contenedor ya existe de una ejecución anterior, solo necesitas iniciarlo:
+
+```bash
+docker start banco-xyz-postgres
 ```
 
 Verifica que quedó corriendo:
@@ -130,37 +199,23 @@ Desde la raíz del proyecto:
 
 Se recomienda usar `clean` para evitar errores por clases compiladas de una versión anterior del código (`target/` desactualizado).
 
-> Durante la compilación aparecen `[WARNING]` de deprecación (`JobLauncher`, `chunk(int, PlatformTransactionManager)`, `taskExecutor(...)`). Son advertencias esperadas de Spring Batch 6.x (que reemplaza esas APIs por `JobOperator` y una nueva sintaxis de `StepBuilder`) y no afectan la compilación ni la ejecución del proyecto.
+> Durante la compilación aparecen `[WARNING]` de deprecación (`JobLauncher`, `chunk(int, PlatformTransactionManager)`, `taskExecutor(...)`). Son advertencias esperadas de Spring Batch 6.x y no afectan la compilación ni la ejecución del proyecto.
 
 Al iniciar, la aplicación:
 1. Crea automáticamente las tablas (`transacciones_procesadas`, `cuentas_interes`, `cuentas_anuales`) en PostgreSQL.
-2. Ejecuta los 3 Jobs en secuencia: `transaccionJob` → `cuentaInteresJob` → `cuentaAnualJob`.
-3. Imprime en consola el detalle de cada anomalía detectada y el resultado (`COMPLETED`) de cada Job.
+2. Ejecuta los 3 Jobs de Batch en secuencia: `transaccionJob` → `cuentaInteresJob` → `cuentaAnualJob`.
+3. Levanta el servidor REST (Tomcat, puerto `8080`) con los 3 BFF disponibles.
 
 ### 3. Verificar los datos persistidos
 
-Puedes conectarte a la base con cualquier cliente PostgreSQL (DBeaver, pgAdmin, `psql`, etc.):
-
-- Host: `localhost`
-- Puerto: `5432`
-- Base de datos: `bancoxyz`
-- Usuario: `bancoxyz`
-- Contraseña: `bancoxyz123`
-
-Si no tienes el cliente `psql` instalado localmente, puedes usar el que ya viene incluido en el contenedor de Postgres:
-
 ```bash
-docker exec -it banco-xyz-postgres psql -U bancoxyz -d bancoxyz
+docker exec -it banco-xyz-postgres psql -U bancoxyz -d bancoxyz -c "SELECT cuenta_id, nombre, saldo_final FROM cuentas_interes LIMIT 5;"
 ```
 
-Y luego, dentro de la sesión de `psql`:
+### 4. Probar los BFF
 
-```sql
-SELECT * FROM transacciones_procesadas;
-SELECT * FROM cuentas_interes;
-SELECT * FROM cuentas_anuales;
-```
+Ver la sección "Cómo probar los BFF" más arriba, o el detalle paso a paso en `Exp2_S4_Guia_Pruebas_Postman.md`.
 
 ## Datos de origen
 
-Los archivos CSV (`src/main/resources/data/`) provienen de [bank_legacy_data](https://github.com/KariVillagran/bank_legacy_data) y simulan un sistema legacy con problemas de calidad de datos intencionales, resueltos por los `ItemProcessor` de este proyecto. Desde la Semana 3 se usa el dataset oficial (1000 filas por archivo), en reemplazo del CSV de prueba reducido (9 filas) de las Semanas 1-2.
+Los archivos CSV (`src/main/resources/data/`) provienen de [bank_legacy_data](https://github.com/KariVillagran/bank_legacy_data) y simulan un sistema legacy con problemas de calidad de datos intencionales, resueltos por los `ItemProcessor` de este proyecto. Se usa el dataset oficial (1000 filas por archivo, carpeta `semana_3` del repo de origen).
