@@ -1,5 +1,6 @@
 package com.duoc.bancoxyzbatch.bff.atm;
 
+import org.springframework.http.CacheControl;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -12,11 +13,6 @@ import com.duoc.bancoxyzbatch.bff.dto.CuentaAtmDTO;
 import com.duoc.bancoxyzbatch.bff.dto.RetiroRequestDTO;
 import com.duoc.bancoxyzbatch.bff.dto.RetiroResponseDTO;
 
-/**
- * BFF Cajero Automático: interfaz mínima y segura para operaciones
- * críticas (consulta de saldo y retiro). No expone datos personales
- * ni historial — solo lo estrictamente necesario para la operación.
- */
 @RestController
 @RequestMapping("/api/atm")
 public class AtmBffController {
@@ -29,12 +25,16 @@ public class AtmBffController {
 
     @GetMapping("/cuentas/{cuentaId}/saldo")
     public ResponseEntity<CuentaAtmDTO> consultarSaldo(@PathVariable Long cuentaId) {
-        return ResponseEntity.ok(atmBffService.consultarSaldo(cuentaId));
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.noStore())
+                .body(atmBffService.consultarSaldo(cuentaId));
     }
 
     @PostMapping("/cuentas/{cuentaId}/retiro")
     public ResponseEntity<RetiroResponseDTO> retirar(@PathVariable Long cuentaId,
                                                        @RequestBody RetiroRequestDTO request) {
-        return ResponseEntity.ok(atmBffService.retirar(cuentaId, request.getMonto()));
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.noStore())
+                .body(atmBffService.retirar(cuentaId, request.getMonto()));
     }
 }

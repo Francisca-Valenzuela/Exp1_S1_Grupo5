@@ -7,13 +7,15 @@ import java.util.NoSuchElementException;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.AuthenticationException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 /**
- * Manejo de errores centralizado para los 3 BFF (Web, Móvil, Cajero).
- * Evita duplicar try/catch en cada controlador y asegura respuestas
- * consistentes cuando una cuenta no existe o una operación es inválida.
+ * Manejo de errores centralizado para los 3 BFF (Web, Móvil, Cajero) y para
+ * el endpoint de autenticación (/api/auth/login). Evita duplicar try/catch
+ * en cada controlador y asegura respuestas consistentes cuando una cuenta
+ * no existe, una operación es inválida o las credenciales de login fallan.
  */
 @RestControllerAdvice(basePackages = "com.duoc.bancoxyzbatch.bff")
 public class BffExceptionHandler {
@@ -21,6 +23,11 @@ public class BffExceptionHandler {
     @ExceptionHandler(NoSuchElementException.class)
     public ResponseEntity<Object> handleNotFound(NoSuchElementException ex) {
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(buildBody(ex.getMessage()));
+    }
+
+    @ExceptionHandler(AuthenticationException.class)
+    public ResponseEntity<Object> handleAuthenticationException(AuthenticationException ex) {
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(buildBody("Credenciales invalidas"));
     }
 
     @ExceptionHandler(SaldoInsuficienteException.class)

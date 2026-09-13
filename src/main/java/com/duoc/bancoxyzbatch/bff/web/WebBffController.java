@@ -1,22 +1,20 @@
 package com.duoc.bancoxyzbatch.bff.web;
 
-import java.util.List;
+import java.util.concurrent.TimeUnit;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.http.CacheControl;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.duoc.bancoxyzbatch.bff.dto.CuentaWebDTO;
 import com.duoc.bancoxyzbatch.bff.dto.TransaccionWebDTO;
 
-/**
- * BFF Web: optimizado para navegadores. Entrega datos completos
- * (incluida la anomalía de cada transacción y el historial completo
- * de movimientos por cuenta) para soportar interfaces ricas
- * (tablas, gráficos, auditoría).
- */
 @RestController
 @RequestMapping("/api/web")
 public class WebBffController {
@@ -28,12 +26,21 @@ public class WebBffController {
     }
 
     @GetMapping("/transacciones")
-    public ResponseEntity<List<TransaccionWebDTO>> listarTransacciones() {
-        return ResponseEntity.ok(webBffService.listarTransacciones());
+    public ResponseEntity<Page<TransaccionWebDTO>> listarTransacciones(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+
+        Page<TransaccionWebDTO> resultado = webBffService.listarTransacciones(PageRequest.of(page, size));
+
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.maxAge(30, TimeUnit.SECONDS))
+                .body(resultado);
     }
 
     @GetMapping("/cuentas/{cuentaId}")
     public ResponseEntity<CuentaWebDTO> obtenerCuenta(@PathVariable Long cuentaId) {
-        return ResponseEntity.ok(webBffService.obtenerCuenta(cuentaId));
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.maxAge(30, TimeUnit.SECONDS))
+                .body(webBffService.obtenerCuenta(cuentaId));
     }
 }

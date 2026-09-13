@@ -4,6 +4,8 @@ import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.stream.Collectors;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 
 import com.duoc.bancoxyzbatch.bff.dto.CuentaWebDTO;
@@ -30,10 +32,13 @@ public class WebBffService {
         this.cuentaAnualRepository = cuentaAnualRepository;
     }
 
-    public List<TransaccionWebDTO> listarTransacciones() {
-        return transaccionRepository.findAll().stream()
-                .map(t -> new TransaccionWebDTO(t.getId(), t.getFecha(), t.getMonto(), t.getTipo(), t.getAnomalia()))
-                .collect(Collectors.toList());
+    /**
+     * Devuelve las transacciones paginadas: evita cargar y serializar el
+     * dataset completo en cada llamada (optimización de recursos por canal).
+     */
+    public Page<TransaccionWebDTO> listarTransacciones(Pageable pageable) {
+        return transaccionRepository.findAll(pageable)
+                .map(t -> new TransaccionWebDTO(t.getId(), t.getFecha(), t.getMonto(), t.getTipo(), t.getAnomalia()));
     }
 
     public CuentaWebDTO obtenerCuenta(Long cuentaId) {

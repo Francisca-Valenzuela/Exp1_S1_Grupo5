@@ -28,16 +28,18 @@ src/main/java/com/duoc/bancoxyzbatch/
 │   ├── TransaccionJobConfig.java   # Job + Step 1
 │   ├── CuentaInteresJobConfig.java # Job + Step 2
 │   ├── CuentaAnualJobConfig.java   # Job + Step 3
-│   └── SecurityConfig.java         # Autenticación/autorización por canal BFF (Exp2 S4)
+│   ├── SecurityConfig.java         # Autorización por canal + filtro JWT (Exp2 S4/S5)
+│   └── HttpsRedirectConfig.java    # Redirige HTTP -> HTTPS de forma uniforme (Exp2 S5)
 ├── entity/            # Entidades JPA (tablas destino ya validadas)
 ├── model/              # POJOs de lectura cruda del CSV
 ├── repository/          # Repositorios Spring Data JPA
-└── bff/                 # Backend for Frontend (Exp2 S4) — ver detalle más abajo
-    ├── dto/
-    ├── web/
-    ├── mobile/
-    ├── atm/
-    └── exception/
+└── bff/                 # Backend for Frontend
+    ├── dto/              # DTOs por canal (Exp2 S4)
+    ├── web/              # WebBffController + WebBffService (Exp2 S4, paginado en S5)
+    ├── mobile/           # MobileBffController + MobileBffService (Exp2 S4)
+    ├── atm/              # AtmBffController + AtmBffService (Exp2 S4)
+    ├── exception/        # Manejo de errores común (Exp2 S4, ahora también login fallido)
+    └── security/         # JwtService, JwtAuthenticationFilter, AuthController (Exp2 S5)
 ```
 
 Cada Job de Batch sigue el patrón estándar de Spring Batch: **ItemReader** (lee el CSV) → **ItemProcessor** (valida, transforma y detecta anomalías) → **ItemWriter** (persiste en PostgreSQL).
@@ -108,9 +110,11 @@ El análisis completo, con la tabla comparativa de las 3 estrategias y la justif
 | **Móvil** | `GET /api/mobile/cuentas/{id}` | `ROLE_MOBILE` | Datos esenciales: `cuentaId`, `nombre`, `saldoActual`, y solo los 5 movimientos más recientes |
 | **Cajero (ATM)** | `GET /api/atm/cuentas/{id}/saldo`, `POST /api/atm/cuentas/{id}/retiro` | `ROLE_ATM` | Mínimo indispensable: `cuentaId` + `saldoDisponible`; el retiro valida saldo suficiente y devuelve `422` con mensaje claro si no lo hay |
 
-### Autenticación y autorización por canal
+### Autenticación y autorización por canal (histórico Exp2 S4, reemplazado por JWT en S5)
 
-Se usa **Spring Security con Basic Auth** y un usuario/rol distinto por canal (`SecurityConfig.java`):
+> Desde Exp2 S5 la autenticación es 100% por token JWT (ver sección más abajo). Se deja esta referencia solo con fines históricos/comparativos.
+
+En la Semana 4 se usó **Spring Security con Basic Auth** y un usuario/rol distinto por canal (`SecurityConfig.java`):
 
 | Canal | Usuario | Contraseña | Rol requerido |
 |---|---|---|---|
@@ -133,29 +137,105 @@ bff/
 
 Los 3 BFF reutilizan las entidades y repositorios ya existentes del proyecto batch (`TransaccionRepository`, `CuentaInteresRepository`, `CuentaAnualRepository`), sumando un único método nuevo: `CuentaAnualRepository.findByCuentaId(Long)`.
 
-### Cómo probar los BFF
+### Cómo probar los BFF (histórico Exp2 S4, con Basic Auth)
 
-Con el proyecto corriendo (ver "Instrucciones para ejecutar" más abajo), usa Postman o `curl` con Basic Auth:
+> Desde Exp2 S5 la autenticación cambió a JWT y el servidor solo responde por HTTPS (puerto 8443). Ver la sección "Cómo probar los BFF (con JWT + HTTPS)" más abajo para los comandos actualizados.
 
 ```bash
 # Web (datos completos)
 curl -u web-client:web-secret http://localhost:8080/api/web/cuentas/124
-
-# Móvil (datos livianos)
-curl -u mobile-client:mobile-secret http://localhost:8080/api/mobile/cuentas/124
-
-# Cajero: consulta de saldo
-curl -u atm-client:atm-secret http://localhost:8080/api/atm/cuentas/124/saldo
-
-# Cajero: retiro (Postman recomendado por temas de escapado de comillas en PowerShell)
-# POST /api/atm/cuentas/124/retiro
-# Body raw JSON: {"monto": 2000}
-
-# Aislamiento entre canales (debe dar 403)
-curl -i -u mobile-client:mobile-secret http://localhost:8080/api/web/cuentas/124
 ```
 
-Las capturas de cada una de estas pruebas están en `Evidencias.docx`, incluida en esta entrega.
+---
+
+## Novedades Exp2 Semana 5: HTTPS, tokens JWT y optimización de recursos
+
+### 1) Estrategia de implementación de BFF (revisión Semana 5)
+
+Se ratifica la estrategia **"Diseño de endpoints personalizados"** elegida en la Semana 4 (ver [`Exp2_S4_Analisis_Estrategia_BFF.md`](./Exp2_S4_Analisis_Estrategia_BFF.md)): una sola aplicación Spring Boot, tres conjuntos de rutas/DTOs/reglas de seguridad (`/api/web/**`, `/api/mobile/**`, `/api/atm/**`). Sigue siendo la mejor opción para un equipo pequeño que necesita extender — no reescribir — el monolito Batch ya existente.
+
+### 2) HTTPS en los 3 BFF
+
+Todo el tráfico se sirve exclusivamente por HTTPS:
+
+- `server.ssl.enabled=true`, con un certificado autofirmado PKCS12 (`src/main/resources/keystore.p12`, alias `bancoxyz-bff`) cargado desde `application.properties`.
+- La app escucha en **`https://localhost:8443`** para los 3 canales.
+- `HttpsRedirectConfig` agrega un segundo conector Tomcat en el puerto 8080 que **redirige automáticamente** cualquier solicitud HTTP hacia HTTPS, de modo que ningún BFF queda accesible sin cifrar.
+- El certificado se generó con:
+  ```bash
+  keytool -genkeypair -alias bancoxyz-bff -keyalg RSA -keysize 2048 -validity 3650 \
+    -storetype PKCS12 -keystore src/main/resources/keystore.p12 -storepass bancoxyz123 \
+    -dname "CN=localhost, OU=BancoXYZ, O=DuocUC, L=Santiago, ST=RM, C=CL"
+  ```
+  Por ser autofirmado, el navegador, `curl` o Postman mostrarán una advertencia de certificado no confiable (`curl -k` para pruebas locales, o desactivar "SSL certificate verification" en Postman Settings → General); en un despliegue real se reemplazaría por un certificado emitido por una CA.
+
+### 3) Autenticación y autorización por canal con JWT
+
+Se reemplazó Basic Auth (Semana 4) por **tokens JWT firmados (HS256)**:
+
+1. Cada canal se autentica **una sola vez** contra `POST /api/auth/login` con sus credenciales (las mismas de Semana 4: `web-client/web-secret`, `mobile-client/mobile-secret`, `atm-client/atm-secret`).
+2. Recibe un JWT con claims `canal` y `rol`, válido por 30 minutos (`bff.jwt.expiration-minutes`).
+3. Reenvía ese token en el header `Authorization: Bearer <token>` en cada llamada a su BFF. `JwtAuthenticationFilter` lo valida en cada request (autenticación *stateless*, sin sesión de servidor) y `SecurityConfig` autoriza según el rol contra el path exacto del canal — un token del canal Móvil sigue sin poder usarse contra `/api/web/**` (403 Forbidden).
+
+| Canal | Usuario | Contraseña | Rol / claim `rol` |
+|---|---|---|---|
+| Web | `web-client` | `web-secret` | `WEB` |
+| Móvil | `mobile-client` | `mobile-secret` | `MOBILE` |
+| Cajero | `atm-client` | `atm-secret` | `ATM` |
+
+### 4) Optimización de respuestas y consumo de recursos por canal
+
+- **Compresión gzip** habilitada a nivel de servidor (`server.compression.enabled=true`) para las 3 APIs.
+- **Paginación** en `GET /api/web/transacciones` (`?page=0&size=20`), para no serializar el dataset completo en cada llamada del canal Web.
+- **Cache-Control por canal**, según la sensibilidad y frecuencia de cambio de cada dato:
+  - Web: `max-age=30` (datos de auditoría, cambian poco).
+  - Móvil: `max-age=15` (saldo resumido, se tolera algo de latencia en la propagación a cambio de menos llamadas repetidas desde la app).
+  - Cajero: `no-store` (saldo y retiro son operaciones críticas; nunca se sirven desde caché).
+
+### Cómo probar los BFF (con JWT + HTTPS)
+
+Con el proyecto corriendo (ver "Instrucciones para ejecutar" más abajo):
+
+```bash
+# 1) Login por canal: se obtiene el token JWT (curl -k por certificado autofirmado)
+TOKEN_WEB=$(curl -sk -X POST https://localhost:8443/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"web-client","password":"web-secret"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])")
+
+TOKEN_MOBILE=$(curl -sk -X POST https://localhost:8443/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"mobile-client","password":"mobile-secret"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])")
+
+TOKEN_ATM=$(curl -sk -X POST https://localhost:8443/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"atm-client","password":"atm-secret"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])")
+
+# 2) Web (datos completos, paginado)
+curl -sk https://localhost:8443/api/web/cuentas/124 -H "Authorization: Bearer $TOKEN_WEB"
+curl -sk "https://localhost:8443/api/web/transacciones?page=0&size=10" -H "Authorization: Bearer $TOKEN_WEB"
+
+# 3) Móvil (datos livianos)
+curl -sk https://localhost:8443/api/mobile/cuentas/124 -H "Authorization: Bearer $TOKEN_MOBILE"
+
+# 4) Cajero: consulta de saldo y retiro
+curl -sk https://localhost:8443/api/atm/cuentas/124/saldo -H "Authorization: Bearer $TOKEN_ATM"
+curl -sk -X POST https://localhost:8443/api/atm/cuentas/124/retiro \
+  -H "Authorization: Bearer $TOKEN_ATM" -H "Content-Type: application/json" \
+  -d '{"monto": 2000}'
+
+# 5) Aislamiento entre canales (debe dar 403 Forbidden): token Móvil contra el BFF Web
+curl -sk -i https://localhost:8443/api/web/cuentas/124 -H "Authorization: Bearer $TOKEN_MOBILE"
+
+# 6) Sin token (debe dar 401/403): confirma que ya no existe acceso anónimo
+curl -sk -i https://localhost:8443/api/atm/cuentas/124/saldo
+
+# 7) HTTP simple redirige a HTTPS (debe responder 3xx hacia https://localhost:8443/...)
+curl -i http://localhost:8080/api/web/cuentas/124
+```
+
+También hay una **colección de Postman lista para importar** (`BancoXYZ_BFF.postman_collection.json` + `BancoXYZ_Local.postman_environment.json`), con los mismos casos organizados en carpetas `Auth`, `Web`, `Mobile`, `ATM` y `Seguridad (casos negativos)`, incluyendo scripts que guardan los tokens automáticamente tras el login.
+
+Las capturas de cada una de estas pruebas (login, uso del token, aislamiento entre canales, redirección HTTPS) están en `Evidencias.docx`, incluida en esta entrega.
 
 ---
 
@@ -165,7 +245,8 @@ Las capturas de cada una de estas pruebas están en `Evidencias.docx`, incluida 
 - **Spring Boot 4.1.0** / **Spring Batch 6**
 - **Spring Data JPA** (Hibernate)
 - **Spring Web** (BFF REST — Exp2 S4)
-- **Spring Security** (Basic Auth por canal — Exp2 S4)
+- **Spring Security + JWT (jjwt 0.12.6)** — autenticación/autorización por canal, 100% stateless (Exp2 S5)
+- **HTTPS / TLS** con certificado autofirmado PKCS12, redirección automática desde HTTP (Exp2 S5)
 - **PostgreSQL 16** (vía contenedor Docker)
 - **Maven**
 
@@ -204,7 +285,7 @@ Se recomienda usar `clean` para evitar errores por clases compiladas de una vers
 Al iniciar, la aplicación:
 1. Crea automáticamente las tablas (`transacciones_procesadas`, `cuentas_interes`, `cuentas_anuales`) en PostgreSQL.
 2. Ejecuta los 3 Jobs de Batch en secuencia: `transaccionJob` → `cuentaInteresJob` → `cuentaAnualJob`.
-3. Levanta el servidor REST (Tomcat, puerto `8080`) con los 3 BFF disponibles.
+3. Levanta el servidor REST por **HTTPS en el puerto `8443`** (Tomcat) con los 3 BFF disponibles, más un conector HTTP en el puerto `8080` que solo redirige hacia HTTPS (ver "Novedades Exp2 Semana 5" más abajo).
 
 ### 3. Verificar los datos persistidos
 
@@ -214,7 +295,7 @@ docker exec -it banco-xyz-postgres psql -U bancoxyz -d bancoxyz -c "SELECT cuent
 
 ### 4. Probar los BFF
 
-Ver la sección "Cómo probar los BFF" más arriba, o el detalle paso a paso en `Exp2_S4_Guia_Pruebas_Postman.md`.
+Ver la sección "Cómo probar los BFF (con JWT + HTTPS)" más arriba, o importar directamente la colección de Postman incluida en esta entrega.
 
 ## Datos de origen
 
