@@ -1,0 +1,16 @@
+server:
+  port: 8443
+  ssl:
+    enabled: false   # deshabilitado para simplificar las llamadas internas
+                      # BFF -> core con RestClient balanceado por Eureka.
+                      # Para reactivar TLS, ver keystore.p12 y volver a poner
+                      # enabled: true (igual que en semanas anteriores).
+
+spring:
+  application:
+    name: banco-xyz-core
+
+batch:
+  partition:
+    grid-size: 3
+  skip-limit: 300

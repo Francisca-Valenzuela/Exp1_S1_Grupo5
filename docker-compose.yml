@@ -1,0 +1,15 @@
+services:
+  banco-xyz-postgres:
+    image: postgres:16
+    container_name: banco-xyz-postgres
+    environment:
+      POSTGRES_DB: bancoxyz
+      POSTGRES_USER: bancoxyz
+      POSTGRES_PASSWORD: bancoxyz123
+    ports:
+      - "5432:5432"
+    volumes:
+      - banco-xyz-postgres-data:/var/lib/postgresql/data
+
+volumes:
+  banco-xyz-postgres-data:

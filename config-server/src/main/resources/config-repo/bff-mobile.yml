@@ -1,0 +1,29 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: bff-mobile
+
+core:
+  service-id: banco-xyz-core
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      coreService:
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+  timelimiter:
+    instances:
+      coreService:
+        timeout-duration: 3s
+  retry:
+    instances:
+      coreService:
+        max-attempts: 2
+        wait-duration: 500ms

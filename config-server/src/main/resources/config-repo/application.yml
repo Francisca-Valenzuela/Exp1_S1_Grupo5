@@ -1,0 +1,35 @@
+# Configuración COMÚN a todos los microservicios que consultan el Config
+# Server (banco-xyz-core, bff-web, bff-mobile, bff-atm). Cada uno puede
+# sobrescribir estos valores en su propio <spring.application.name>.yml.
+
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+    register-with-eureka: true
+    fetch-registry: true
+  instance:
+    prefer-ip-address: true
+    lease-renewal-interval-in-seconds: 10
+    lease-expiration-duration-in-seconds: 30
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,circuitbreakers
+  endpoint:
+    health:
+      show-details: always
+
+# Secreto compartido para firmar/validar JWT en los 3 canales del BFF.
+# Al vivir en el Config Server, rotarlo es un cambio en un solo lugar.
+bff:
+  jwt:
+    secret: k9carnutu1yNC1opgj7DTsq50WaIefxUVfDgUic/1oiekjV8KiNq1UgpUvr9sOi9r2DFoalI1zNaGTUwzbhA6A==
+    expiration-minutes: 30
+
+# Clave compartida simple para las llamadas internas BFF -> core
+# (autenticación de servicio a servicio).
+internal:
+  api-key: banco-xyz-internal-2026
