@@ -11,5 +11,15 @@ services:
     volumes:
       - banco-xyz-postgres-data:/var/lib/postgresql/data
 
+  banco-xyz-artemis:
+    image: apache/activemq-artemis:latest-alpine
+    container_name: banco-xyz-artemis
+    environment:
+      ARTEMIS_USER: bancoxyz
+      ARTEMIS_PASSWORD: bancoxyz123
+    ports:
+      - "61616:61616"
+      - "8161:8161"
+
 volumes:
   banco-xyz-postgres-data:

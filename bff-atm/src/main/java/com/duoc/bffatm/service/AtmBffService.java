@@ -1,17 +1,19 @@
 package com.duoc.bffatm.service;
 
 import java.util.NoSuchElementException;
+import java.util.UUID;
 
-import org.springframework.http.HttpStatus;
+import org.springframework.jms.core.JmsTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpClientErrorException;
 
 import com.duoc.bffatm.client.CoreClient;
 import com.duoc.bffatm.client.CuentaCoreDTO;
 import com.duoc.bffatm.dto.CuentaAtmDTO;
-import com.duoc.bffatm.dto.RetiroResponseDTO;
+import com.duoc.bffatm.dto.RetiroAceptadoDTO;
+import com.duoc.bffatm.dto.RetiroEstadoDTO;
 import com.duoc.bffatm.exception.CoreNoDisponibleException;
-import com.duoc.bffatm.exception.SaldoInsuficienteException;
+import com.duoc.bffatm.store.RetiroEstadoStore;
 
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import io.github.resilience4j.retry.annotation.Retry;
@@ -20,9 +22,13 @@ import io.github.resilience4j.retry.annotation.Retry;
 public class AtmBffService {
 
     private final CoreClient coreClient;
+    private final JmsTemplate jmsTemplate;
+    private final RetiroEstadoStore estadoStore;
 
-    public AtmBffService(CoreClient coreClient) {
+    public AtmBffService(CoreClient coreClient, JmsTemplate jmsTemplate, RetiroEstadoStore estadoStore) {
         this.coreClient = coreClient;
+        this.jmsTemplate = jmsTemplate;
+        this.estadoStore = estadoStore;
     }
 
     @Retry(name = "coreService")
@@ -36,34 +42,35 @@ public class AtmBffService {
         }
     }
 
-    // El retiro NO lleva @CircuitBreaker/@Retry: es una operacion que
-    // modifica saldo, y reintentarla automaticamente ante una respuesta
-    // ambigua (timeout) podria duplicar un descuento. Sí se deja que, si
-    // core esta completamente caido, la llamada falle rapido y se informe
-    // al cajero, en vez de bloquear la operacion indefinidamente.
-    public RetiroResponseDTO retirar(Long cuentaId, Double monto) {
-        try {
-            return coreClient.retirar(cuentaId, monto);
-        } catch (HttpClientErrorException.NotFound ex) {
-            throw new NoSuchElementException("Cuenta " + cuentaId + " no encontrada");
-        } catch (HttpClientErrorException ex) {
-            if (ex.getStatusCode() == HttpStatus.UNPROCESSABLE_ENTITY) {
-                throw new SaldoInsuficienteException(
-                        "Saldo insuficiente en la cuenta " + cuentaId + " para retirar " + monto);
-            }
-            if (ex.getStatusCode() == HttpStatus.BAD_REQUEST) {
-                throw new IllegalArgumentException("El monto a retirar debe ser mayor a cero");
-            }
-            throw new CoreNoDisponibleException("No fue posible procesar el retiro. Intenta nuevamente.");
-        }
+    // Tolerancia a fallos para la mensajería asíncrona (config: instancia "jmsBroker")
+    @Retry(name = "jmsBroker")
+    @CircuitBreaker(name = "jmsBroker", fallbackMethod = "retirarFallback")
+    public RetiroAceptadoDTO retirar(Long cuentaId, Double monto) {
+        String solicitudId = UUID.randomUUID().toString();
+
+        // Evento RetiroSolicitado: el cuerpo es el monto, el resto viaja como propiedades
+        jmsTemplate.convertAndSend("cola.retiros.pendientes", monto, message -> {
+            message.setLongProperty("cuentaId", cuentaId);
+            message.setStringProperty("solicitudId", solicitudId);
+            return message;
+        });
+
+        estadoStore.guardar(new RetiroEstadoDTO(solicitudId, cuentaId, monto, "PENDIENTE", null));
+
+        return new RetiroAceptadoDTO(solicitudId, cuentaId, monto, "PENDIENTE");
     }
 
-    @SuppressWarnings("unused")
-    private CuentaAtmDTO consultarSaldoFallback(Long cuentaId, Throwable ex) {
-        if (ex instanceof NoSuchElementException) {
-            throw (NoSuchElementException) ex;
-        }
+    // Fallback: el broker está caído o el circuito está abierto
+    public RetiroAceptadoDTO retirarFallback(Long cuentaId, Double monto, Throwable ex) {
         throw new CoreNoDisponibleException(
-                "El servicio de cuentas no esta disponible en este momento. Intenta nuevamente en unos segundos.");
+                "El sistema de transacciones está temporalmente fuera de servicio. Tu retiro no pudo ser encolado.");
+    }
+
+    public RetiroEstadoDTO consultarEstado(String solicitudId) {
+        RetiroEstadoDTO estado = estadoStore.buscar(solicitudId);
+        if (estado == null) {
+            throw new NoSuchElementException("Solicitud " + solicitudId + " no encontrada");
+        }
+        return estado;
     }
 }

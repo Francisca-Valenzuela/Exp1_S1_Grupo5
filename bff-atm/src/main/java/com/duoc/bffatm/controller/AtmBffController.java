@@ -10,8 +10,9 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.duoc.bffatm.dto.CuentaAtmDTO;
+import com.duoc.bffatm.dto.RetiroAceptadoDTO;
+import com.duoc.bffatm.dto.RetiroEstadoDTO;
 import com.duoc.bffatm.dto.RetiroRequestDTO;
-import com.duoc.bffatm.dto.RetiroResponseDTO;
 import com.duoc.bffatm.service.AtmBffService;
 
 @RestController
@@ -32,10 +33,17 @@ public class AtmBffController {
     }
 
     @PostMapping("/cuentas/{cuentaId}/retiro")
-    public ResponseEntity<RetiroResponseDTO> retirar(@PathVariable Long cuentaId,
-                                                       @RequestBody RetiroRequestDTO request) {
-        return ResponseEntity.ok()
+    public ResponseEntity<RetiroAceptadoDTO> retirar(@PathVariable Long cuentaId,
+                                                     @RequestBody RetiroRequestDTO request) {
+        return ResponseEntity.accepted()
                 .cacheControl(CacheControl.noStore())
                 .body(atmBffService.retirar(cuentaId, request.getMonto()));
+    }
+
+    @GetMapping("/retiros/{solicitudId}")
+    public ResponseEntity<RetiroEstadoDTO> consultarRetiro(@PathVariable String solicitudId) {
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.noStore())
+                .body(atmBffService.consultarEstado(solicitudId));
     }
 }

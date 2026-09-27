@@ -18,6 +18,13 @@ resilience4j:
         wait-duration-in-open-state: 10s
         permitted-number-of-calls-in-half-open-state: 3
         automatic-transition-from-open-to-half-open-enabled: true
+      jmsBroker:
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
   timelimiter:
     instances:
       coreService:
@@ -26,4 +33,7 @@ resilience4j:
     instances:
       coreService:
         max-attempts: 2
+        wait-duration: 500ms
+      jmsBroker:
+        max-attempts: 3
         wait-duration: 500ms
