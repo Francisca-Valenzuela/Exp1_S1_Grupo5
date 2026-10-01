@@ -42,6 +42,18 @@ public class AtmBffService {
         }
     }
 
+    // Fallback de consultarSaldo: se ejecuta cuando el core no responde, responde
+    // con error o el circuito esta abierto. Una cuenta inexistente sigue siendo
+    // un 404 (no una caida del servicio).
+    @SuppressWarnings("unused")
+    private CuentaAtmDTO consultarSaldoFallback(Long cuentaId, Throwable ex) {
+        if (ex instanceof NoSuchElementException noEncontrada) {
+            throw noEncontrada;
+        }
+        throw new CoreNoDisponibleException(
+                "El servicio de cuentas no esta disponible en este momento. Intenta nuevamente en unos segundos.");
+    }
+
     // Tolerancia a fallos para la mensajería asíncrona (config: instancia "jmsBroker")
     @Retry(name = "jmsBroker")
     @CircuitBreaker(name = "jmsBroker", fallbackMethod = "retirarFallback")

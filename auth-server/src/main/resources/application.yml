@@ -1,0 +1,51 @@
+server:
+  port: 9000
+
+spring:
+  application:
+    name: auth-server
+  security:
+    oauth2:
+      authorizationserver:
+        # Valor del claim "iss" de los tokens. En Docker se sobrescribe con AUTH_ISSUER.
+        issuer: ${AUTH_ISSUER:http://localhost:9000}
+        client:
+          web-client:
+            registration:
+              client-id: web-client
+              client-secret: "{bcrypt}$2a$10$3ugBfOFsn89C9XK/53JFVuClgZFAA/BDDO3agPy2v8ATgUYZi0tji"
+              client-authentication-methods:
+                - client_secret_basic
+              authorization-grant-types:
+                - client_credentials
+              scopes:
+                - web
+            token:
+              access-token-format: self-contained
+              access-token-time-to-live: 30m
+          mobile-client:
+            registration:
+              client-id: mobile-client
+              client-secret: "{bcrypt}$2a$10$eigEmI/c0pOawHHXFktFxeVKXrERquBni6gKuK5Y9pHQfWE2B5VMW"
+              client-authentication-methods:
+                - client_secret_basic
+              authorization-grant-types:
+                - client_credentials
+              scopes:
+                - mobile
+            token:
+              access-token-format: self-contained
+              access-token-time-to-live: 30m
+          atm-client:
+            registration:
+              client-id: atm-client
+              client-secret: "{bcrypt}$2a$10$sZlBcAZyYLCH3Tkx7VaZ9OcMppu7VDS3oA8S5Hsiwey3A64JdChmy"
+              client-authentication-methods:
+                - client_secret_basic
+              authorization-grant-types:
+                - client_credentials
+              scopes:
+                - atm
+            token:
+              access-token-format: self-contained
+              access-token-time-to-live: 30m
