@@ -2,39 +2,33 @@ package com.duoc.bancoxyzbatch.config;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.web.SecurityFilterChain;
-import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
-
-import com.duoc.bancoxyzbatch.internal.InternalApiKeyFilter;
 
 /**
- * banco-xyz-core es un microservicio interno: no atiende usuarios finales
- * directamente (eso lo hacen bff-web, bff-mobile y bff-atm, cada uno con su
- * propia autenticacion JWT por canal). Aun asi, sus endpoints /internal/**
- * quedan protegidos por una clave de servicio a servicio para que solo los
- * BFF autorizados puedan consumirlos, aunque queden expuestos en la red.
+ * banco-xyz-core es un Resource Server OAuth2.0. Los BFF reenvian (token
+ * relay) el access token del canal; el core valida firma, emisor y scope.
+ * Ya no existe la API key compartida de la Semana 6.
  */
 @Configuration
 @EnableWebSecurity
 public class SecurityConfig {
 
     @Bean
-    public SecurityFilterChain filterChain(HttpSecurity http,
-                                            InternalApiKeyFilter internalApiKeyFilter) throws Exception {
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
         http
             .csrf(csrf -> csrf.disable())
             .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
-                .requestMatchers("/h2-console/**").permitAll()
                 .requestMatchers("/actuator/**").permitAll()
-                .requestMatchers("/internal/**").permitAll() // filtrado real por InternalApiKeyFilter
-                .anyRequest().authenticated()
+                .requestMatchers("/internal/**").hasAnyAuthority(
+                        "SCOPE_web", "SCOPE_mobile", "SCOPE_atm", "SCOPE_internal")
+                .anyRequest().denyAll()
             )
-            .addFilterBefore(internalApiKeyFilter, UsernamePasswordAuthenticationFilter.class)
-            .headers(headers -> headers.frameOptions(frame -> frame.sameOrigin()));
+            .oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()));
 
         return http.build();
     }

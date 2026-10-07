@@ -1,7 +1,6 @@
 package com.duoc.bancoxyzbatch.batch;
 
 import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -18,8 +17,6 @@ public class TransaccionProcessor implements ItemProcessor<TransaccionCsv, Trans
     // compartida debe soportar escritura simultánea sin corromperse
     private final Set<String> clavesVistas = ConcurrentHashMap.newKeySet();
 
-    private static final DateTimeFormatter FORMATO_ISO = DateTimeFormatter.ofPattern("yyyy-MM-dd");
-    private static final DateTimeFormatter FORMATO_LEGACY = DateTimeFormatter.ofPattern("yyyy/MM/dd");
 
     @Override
     public TransaccionEntity process(TransaccionCsv item) {
@@ -51,18 +48,6 @@ public class TransaccionProcessor implements ItemProcessor<TransaccionCsv, Trans
     }
 
     private LocalDate parseFecha(String fechaRaw) {
-        String fecha = fechaRaw != null ? fechaRaw.trim() : null;
-        if (fecha == null || fecha.isBlank()) {
-            throw new DatoInvalidoException("Fecha nula en registro de transaccion");
-        }
-        try {
-            return LocalDate.parse(fecha, FORMATO_ISO);
-        } catch (Exception e1) {
-            try {
-                return LocalDate.parse(fecha, FORMATO_LEGACY);
-            } catch (Exception e2) {
-                throw new DatoInvalidoException("Fecha con formato irreconocible: " + fecha, e2);
-            }
-        }
+        return FechaParser.parse(fechaRaw, "transaccion");
     }
 }

@@ -13,6 +13,6 @@ WORKDIR /app
 RUN addgroup -S app && adduser -S app -G app
 COPY --from=build /workspace/target/*.jar app.jar
 USER app
-ENV JAVA_OPTS="-XX:MaxRAMPercentage=75"
+ENV JAVA_OPTS="-XX:MaxRAMPercentage=60 -XX:+UseSerialGC"
 EXPOSE 8082
 ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]

@@ -1,6 +1,4 @@
-# Perfil "docker": se aplica cuando el microservicio arranca con
-# SPRING_PROFILES_ACTIVE=docker (docker-compose.yaml). Dentro de la red de
-# Docker los servicios se ubican por el NOMBRE del servicio, no por localhost.
+# Perfil "docker": dentro de la red de Docker los servicios se ubican por NOMBRE, no por localhost.
 eureka:
   client:
     service-url:
@@ -14,3 +12,5 @@ spring:
           # Debe coincidir con AUTH_ISSUER del contenedor auth-server
           issuer-uri: http://auth-server:9000
           jwk-set-uri: http://auth-server:9000/oauth2/jwks
+  kafka:
+    bootstrap-servers: kafka:9092

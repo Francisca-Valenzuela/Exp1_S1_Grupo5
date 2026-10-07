@@ -1,77 +1,80 @@
 package com.duoc.bffweb.service;
 
 import java.util.List;
-import java.util.stream.Collectors;
 
 import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 
+import com.duoc.bffweb.client.ClienteServiceDTO;
+import com.duoc.bffweb.client.ClientesClient;
 import com.duoc.bffweb.client.CoreClient;
 import com.duoc.bffweb.client.CuentaCoreDTO;
+import com.duoc.bffweb.client.CuentaServiceDTO;
+import com.duoc.bffweb.client.CuentasClient;
 import com.duoc.bffweb.client.MovimientoCoreDTO;
 import com.duoc.bffweb.dto.CuentaWebDTO;
 import com.duoc.bffweb.dto.MovimientoWebDTO;
 import com.duoc.bffweb.dto.TransaccionWebDTO;
-import com.duoc.bffweb.exception.CoreNoDisponibleException;
-
-import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
-import io.github.resilience4j.retry.annotation.Retry;
 
 /**
- * Capa de negocio del BFF Web. Cada metodo que llama a banco-xyz-core queda
- * protegido con Resilience4j:
- *  - @Retry: reintenta ante fallas transitorias (ej. timeout puntual).
- *  - @CircuitBreaker: si las fallas se repiten, "abre el circuito" y deja de
- *    insistir contra un servicio caido, respondiendo de inmediato via el
- *    metodo de fallback (patron Fallback / Respuesta alternativa).
+ * Composicion de datos para el canal Web: agrega 3 servicios (cuentas, clientes, core).
+ * cuentas-service es esencial (si cae => 503); clientes y core son opcionales (si caen => datosParciales=true).
+ * Cada llamada esta protegida con Resilience4j dentro de su cliente.
  */
 @Service
 public class WebBffService {
 
+    private final CuentasClient cuentasClient;
+    private final ClientesClient clientesClient;
     private final CoreClient coreClient;
 
-    public WebBffService(CoreClient coreClient) {
+    public WebBffService(CuentasClient cuentasClient, ClientesClient clientesClient, CoreClient coreClient) {
+        this.cuentasClient = cuentasClient;
+        this.clientesClient = clientesClient;
         this.coreClient = coreClient;
     }
 
-    @Retry(name = "coreService")
-    @CircuitBreaker(name = "coreService", fallbackMethod = "obtenerCuentaFallback")
     public CuentaWebDTO obtenerCuenta(Long cuentaId) {
-        CuentaCoreDTO cuenta = coreClient.obtenerCuenta(cuentaId);
+        CuentaServiceDTO cuenta = cuentasClient.obtener(cuentaId);   // esencial
+        ClienteServiceDTO cliente = cuenta.getClienteId() == null ? null : clientesClient.obtener(cuenta.getClienteId());
+        CuentaCoreDTO legacy = coreClient.obtenerCuenta(cuentaId);
 
-        List<MovimientoWebDTO> historial = cuenta.getMovimientos() == null
-                ? List.of()
-                : cuenta.getMovimientos().stream().map(this::toMovimientoWebDTO).collect(Collectors.toList());
+        CuentaWebDTO dto = new CuentaWebDTO();
+        dto.setCuentaId(cuenta.getCuentaId());
+        dto.setClienteId(cuenta.getClienteId());
+        dto.setTipo(cuenta.getTipo());
+        dto.setEstado(cuenta.getEstado());
+        dto.setSaldoActual(cuenta.getSaldo());
 
-        return new CuentaWebDTO(
-                cuenta.getCuentaId(), cuenta.getNombre(), cuenta.getEdad(), cuenta.getTipo(),
-                cuenta.getSaldoInicial(), cuenta.getSaldoFinal(), historial);
+        if (cliente != null) {
+            dto.setNombre(cliente.getNombre());
+            dto.setEdad(cliente.getEdad());
+            dto.setEmail(cliente.getEmail());
+            dto.setPerfil(cliente.getPerfil());
+            dto.setNivelRiesgo(cliente.getNivelRiesgo());
+        }
+        List<MovimientoWebDTO> historial = List.of();
+        if (legacy != null) {
+            dto.setSaldoInicialLegacy(legacy.getSaldoInicial());
+            if (cliente == null) {          // respaldo: el core tambien conoce nombre y edad
+                dto.setNombre(legacy.getNombre());
+                dto.setEdad(legacy.getEdad());
+            }
+            if (legacy.getMovimientos() != null) {
+                historial = legacy.getMovimientos().stream().map(this::aMovimientoWeb).toList();
+            }
+        }
+        dto.setHistorialMovimientos(historial);
+        dto.setDatosParciales(cliente == null || legacy == null);
+        return dto;
     }
 
-    @Retry(name = "coreService")
-    @CircuitBreaker(name = "coreService", fallbackMethod = "listarTransaccionesFallback")
     public Page<TransaccionWebDTO> listarTransacciones(Pageable pageable) {
         return coreClient.listarTransacciones(pageable);
     }
 
-    private MovimientoWebDTO toMovimientoWebDTO(MovimientoCoreDTO m) {
+    private MovimientoWebDTO aMovimientoWeb(MovimientoCoreDTO m) {
         return new MovimientoWebDTO(m.getId(), m.getFecha(), m.getTransaccion(), m.getMonto(), m.getDescripcion());
-    }
-
-    // --- Fallbacks: se ejecutan cuando banco-xyz-core no responde, responde
-    // con error, o el circuito esta abierto. El BFF nunca deja al canal Web
-    // sin respuesta: informa la degradacion explicitamente. ---
-
-    @SuppressWarnings("unused")
-    private CuentaWebDTO obtenerCuentaFallback(Long cuentaId, Throwable ex) {
-        throw new CoreNoDisponibleException(
-                "El servicio de cuentas no esta disponible en este momento. Intenta nuevamente en unos segundos.");
-    }
-
-    @SuppressWarnings("unused")
-    private Page<TransaccionWebDTO> listarTransaccionesFallback(Pageable pageable, Throwable ex) {
-        return new PageImpl<>(List.of());
     }
 }

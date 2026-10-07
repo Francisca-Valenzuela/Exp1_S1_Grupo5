@@ -3,6 +3,7 @@ package com.duoc.bffweb.exception;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.NoSuchElementException;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -22,6 +23,11 @@ public class BffExceptionHandler {
     @ExceptionHandler(CoreNoDisponibleException.class)
     public ResponseEntity<Object> handleCoreNoDisponible(CoreNoDisponibleException ex) {
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(buildBody(ex.getMessage()));
+    }
+
+    @ExceptionHandler(NoSuchElementException.class)
+    public ResponseEntity<Object> handleNoSuchElement(NoSuchElementException ex) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(buildBody(ex.getMessage()));
     }
 
     @ExceptionHandler(HttpClientErrorException.NotFound.class)

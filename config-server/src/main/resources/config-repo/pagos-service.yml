@@ -1,0 +1,45 @@
+server:
+  port: 8087
+
+spring:
+  application:
+    name: pagos-service
+  kafka:
+    consumer:
+      group-id: pagos-service
+
+cuentas:
+  service-id: cuentas-service
+
+pagos:
+  alerta:
+    monto-umbral: 1000000   # montos >= umbral generan un evento en alertas.seguridad
+  outbox:
+    intervalo-ms: 5000
+
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+    instances:
+      cuentasService:
+        base-config: default
+      kafkaBroker:
+        base-config: default
+  retry:
+    configs:
+      default:
+        max-attempts: 2
+        wait-duration: 500ms
+    instances:
+      cuentasService:
+        base-config: default
+      kafkaBroker:
+        base-config: default
+        max-attempts: 3

@@ -5,25 +5,42 @@ spring:
   application:
     name: bff-web
 
-core:
-  service-id: banco-xyz-core   # nombre lógico registrado en Eureka
+# Nombres lógicos (Eureka) de los servicios que consume el canal Web
+services:
+  cuentas: cuentas-service
+  clientes: clientes-service
+  core: banco-xyz-core
 
 resilience4j:
   circuitbreaker:
-    instances:
-      coreService:
+    configs:
+      default:
         sliding-window-size: 10
         minimum-number-of-calls: 5
         failure-rate-threshold: 50
         wait-duration-in-open-state: 10s
         permitted-number-of-calls-in-half-open-state: 3
         automatic-transition-from-open-to-half-open-enabled: true
-  timelimiter:
+        ignore-exceptions:
+          - java.util.NoSuchElementException
     instances:
+      cuentasService:
+        base-config: default
+      clientesService:
+        base-config: default
       coreService:
-        timeout-duration: 3s
+        base-config: default
   retry:
-    instances:
-      coreService:
+    configs:
+      default:
         max-attempts: 2
         wait-duration: 500ms
+        ignore-exceptions:
+          - java.util.NoSuchElementException
+    instances:
+      cuentasService:
+        base-config: default
+      clientesService:
+        base-config: default
+      coreService:
+        base-config: default

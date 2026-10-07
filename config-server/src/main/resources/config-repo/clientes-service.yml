@@ -1,0 +1,9 @@
+server:
+  port: 8086
+
+spring:
+  application:
+    name: clientes-service
+  kafka:
+    consumer:
+      group-id: clientes-service

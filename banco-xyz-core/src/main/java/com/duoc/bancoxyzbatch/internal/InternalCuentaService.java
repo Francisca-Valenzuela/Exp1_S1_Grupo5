@@ -7,24 +7,21 @@ import java.util.stream.Collectors;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import com.duoc.bancoxyzbatch.entity.CuentaAnualEntity;
 import com.duoc.bancoxyzbatch.entity.CuentaInteresEntity;
 import com.duoc.bancoxyzbatch.internal.dto.CuentaInternalDTO;
 import com.duoc.bancoxyzbatch.internal.dto.MovimientoInternalDTO;
-import com.duoc.bancoxyzbatch.internal.dto.RetiroResultInternalDTO;
 import com.duoc.bancoxyzbatch.internal.dto.TransaccionInternalDTO;
-import com.duoc.bancoxyzbatch.internal.exception.SaldoInsuficienteException;
 import com.duoc.bancoxyzbatch.repository.CuentaAnualRepository;
 import com.duoc.bancoxyzbatch.repository.CuentaInteresRepository;
 import com.duoc.bancoxyzbatch.repository.TransaccionRepository;
 
 /**
- * Logica de negocio de cuentas/transacciones, ahora expuesta como API
- * interna (antes vivia repartida dentro de WebBffService, MobileBffService y
- * AtmBffService). bff-web, bff-mobile y bff-atm consumen este servicio via
- * HTTP (InternalCuentaController) y adaptan la respuesta a su canal.
+ * Consultas de los datos que genera la migracion batch (cuentas con interes,
+ * movimientos anuales y reporte de transacciones). La gestion operativa de
+ * cuentas (saldos, retiros, apertura, cierre) ahora vive en cuentas-service;
+ * este servicio solo entrega los reportes batch a los BFF.
  */
 @Service
 public class InternalCuentaService {
@@ -57,25 +54,6 @@ public class InternalCuentaService {
                 cuenta.getSaldoFinal(),
                 movimientos
         );
-    }
-
-    @Transactional
-    public RetiroResultInternalDTO retirar(Long cuentaId, Double monto) {
-        if (monto == null || monto <= 0) {
-            throw new IllegalArgumentException("El monto a retirar debe ser mayor a cero");
-        }
-
-        CuentaInteresEntity cuenta = buscarCuenta(cuentaId);
-
-        if (cuenta.getSaldoFinal() < monto) {
-            throw new SaldoInsuficienteException(
-                    "Saldo insuficiente en la cuenta " + cuentaId + " para retirar " + monto);
-        }
-
-        cuenta.setSaldoFinal(cuenta.getSaldoFinal() - monto);
-        cuentaInteresRepository.save(cuenta);
-
-        return new RetiroResultInternalDTO(cuenta.getCuentaId(), monto, cuenta.getSaldoFinal());
     }
 
     public Page<TransaccionInternalDTO> listarTransacciones(Pageable pageable) {

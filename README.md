@@ -1,242 +1,146 @@
-# Banco XYZ - Arquitectura de Microservicios, Spring Batch y Eventos Asíncronos
+# Banco XYZ — Modernización a microservicios (Spring Cloud, Spring Batch y Kafka)
 
-## Objetivo del proyecto
+**Evaluación Final Transversal – Desarrollo Backend III (Semana 9)**
+**Autora:** Francisca Valenzuela
 
-Este proyecto moderniza tres procesos batch legacy del **Banco XYZ** (un banco ficticio) utilizando **Spring Batch**, y expone esos datos a través de un ecosistema de **Microservicios (BFFs)** adaptado a tres tipos de cliente: Web, Móvil y Cajero Automático. En sus últimas iteraciones, el sistema ha evolucionado hacia una arquitectura nativa en la nube utilizando **Spring Cloud** para el descubrimiento y configuración de servicios, **Resilience4j** para tolerancia a fallos, y **JMS (ActiveMQ Artemis)** para el procesamiento asíncrono de transacciones críticas. En la **Semana 8** se agrega seguridad con **OAuth2.0** (Spring Authorization Server) y todo el ecosistema se **dockeriza** y se orquesta con un único `docker-compose.yaml`.
+🔗 **Repositorio GitHub:** https://github.com/Francisca-Valenzuela/Exp1_S1_Grupo5
 
-## Estructura del Ecosistema
+> Solución backend para el **Banco XYZ**, que migra un sistema legacy (COBOL + Shell sobre mainframe) a una arquitectura
+> de microservicios en la nube: procesos batch migrados a Spring Batch, un BFF por canal, microservicios de dominio
+> resilientes, mensajería asíncrona con **Apache Kafka**, seguridad OAuth2.0 distribuida y despliegue con Docker Compose
+> (preparado para AWS).
 
-El proyecto está dividido en los siguientes microservicios:
-*   `auth-server`: **Servidor de autorización OAuth2.0** (Spring Authorization Server). Emite los access tokens (JWT) por canal.
-*   `eureka-server`: Servidor de descubrimiento de servicios (Service Discovery).
-*   `config-server`: Servidor de configuración centralizada.
-*   `banco-xyz-core`: Núcleo del sistema. Ejecuta los procesos Batch, expone la lógica de negocio interna y actúa como Consumidor JMS.
-*   `bff-web`: Backend for Frontend para el canal Web (Consultas paginadas, datos completos).
-*   `bff-mobile`: Backend for Frontend para el canal Móvil (Consultas optimizadas, últimos movimientos).
-*   `bff-atm`: Backend for Frontend para Cajeros Automáticos (Consultas de saldo y envío asíncrono de retiros vía JMS).
-*   `docker-compose.yaml`: orquesta infraestructura (PostgreSQL, Artemis) y los 7 microservicios.
-*   `<servicio>/Dockerfile`: imagen Docker multi-etapa de cada microservicio.
-
----
-
-## Novedades Semanas 1 a 3: Migración Batch Legacy
-
-Se implementaron tres Jobs que leen, validan/transforman y persisten información legacy en PostgreSQL:
-1.  `transaccionJob`: Reporte de transacciones diarias, detectando anomalías.
-2.  `cuentaInteresJob`: Cálculo de intereses mensuales.
-3.  `cuentaAnualJob`: Generación de estados de cuenta anuales.
-
-Se utiliza procesamiento multihilo, colecciones concurrentes, manejo de errores tolerante a fallos (`SkipPolicy`, `RetryLimit`) y escalado avanzado con particiones (`PartitionStep`, `gridSize=3`).
+| Documento | Contenido |
+|---|---|
+| [`readme.md`](readme.md) | Este archivo: visión general y decisiones de arquitectura |
+| [`instrucciones.md`](instrucciones.md) | Cómo ejecutar, probar y escalar la solución paso a paso |
+| [`despliegue.md`](despliegue.md) | Cómo desplegarla en AWS (ECR, ECS Fargate, MSK, RDS, ALB) |
+| `informe_tecnico.pdf` | Análisis de procesos, propuesta de arquitectura y justificación técnica |
 
 ---
 
-## Novedades Semanas 4 y 5: BFF, JWT y Seguridad HTTPS
+## 1. Arquitectura
 
-- **Diseño de Endpoints Personalizados (BFF):** Tres aplicaciones Spring Boot exponen rutas, DTOs y reglas de seguridad distintas por canal (`/api/web/**`, `/api/mobile/**`, `/api/atm/**`).
-- **Seguridad y JWT:** Autenticación y autorización por canal mediante tokens JWT firmados (HS256). *(Reemplazado en la Semana 8 por OAuth2.0, ver más abajo.)*
-- **HTTPS:** Todo el tráfico viaja cifrado (`https://localhost:8443`) utilizando un certificado autofirmado PKCS12, con redirección automática desde HTTP.
+![Arquitectura](docs/img/arq.png)
 
----
-
-## Novedades Semanas 6 y 7: Cloud, Resiliencia y Arquitectura de Eventos
-
-### 1. Ecosistema Spring Cloud
-El proyecto ahora opera como un clúster distribuido:
-- **Config Server:** Centraliza las propiedades de los microservicios (alojadas en `config-repo/`).
-- **Eureka Server:** Permite que los BFFs descubran dinámicamente a `banco-xyz-core` sin depender de IPs o puertos fijos, habilitando el balanceo de carga en los clientes REST (`@LoadBalanced`).
-
-### 2. Tolerancia a Fallos con Resilience4j
-Se integró el patrón **Circuit Breaker** y **Retry** en las llamadas síncronas de los BFFs (Web, Móvil, ATM) hacia el Core. Si el Core falla o experimenta latencia, el circuito se abre y se ejecuta un método *Fallback* que devuelve un error controlado (HTTP 503), evitando la saturación de los hilos de red y caídas en cascada.
-
-### 3. Arquitectura Orientada a Eventos (JMS)
-El endpoint crítico de retiros en el canal Cajero (`POST /api/atm/cuentas/{id}/retiro`) fue refactorizado para operar de forma **asíncrona** utilizando una cola de mensajes.
-
-**Patrón elegido: Saga coreografiada sobre JMS (ActiveMQ Artemis).**
-
-El retiro del cajero es una operación distribuida: bff-atm recibe la orden y
-banco-xyz-core modifica el saldo. En lugar de una llamada síncrona, cada
-servicio ejecuta su transacción local y publica un evento; no existe un
-orquestador central (coreografía).
-
-- `RetiroSolicitado` (cola `cola.retiros.pendientes`): lo publica bff-atm con
-  un `solicitudId` (UUID) que identifica la operación de punta a punta.
-- `RetiroProcesado` / `RetiroRechazado` (cola `cola.retiros.resultado`): los
-  publica banco-xyz-core tras su transacción local. Si el saldo es
-  insuficiente, no se descuenta nada y se informa el rechazo con su motivo.
-- `DLQ`: los mensajes que fallan por error técnico tras varios reintentos se
-  desvían aquí en lugar de perderse.
-
-**¿Por qué JMS y no Kafka?** Se usó el modelo Point-to-Point porque cada retiro
-debe ser procesado por un único consumidor para evitar cobros duplicados. Kafka
-(publish-subscribe con retención de eventos, típico de Event Sourcing) aporta
-reproducción del historial, que no se necesita para una orden financiera de un
-solo uso. La escalabilidad se logra con varios consumidores concurrentes sobre
-la misma cola (competing consumers).
-
-**Consulta del resultado:** como el retiro es asíncrono, `POST /retiro` responde
-`202 Accepted` con el `solicitudId`, y el cajero consulta el estado final en
-`GET /api/atm/retiros/{solicitudId}` (PENDIENTE, PROCESADO o RECHAZADO).
-
-#### Diagrama de Secuencia de Retiro Asíncrono
-```mermaid
-sequenceDiagram
-    autonumber
-    actor C as Cliente ATM
-    participant P as bff-atm
-    participant B as Broker JMS (Artemis)
-    participant Cons as banco-xyz-core
-    participant DB as PostgreSQL
-
-    C->>P: POST /api/atm/cuentas/{id}/retiro
-    Note over P: Resilience4j Retry + CircuitBreaker (jmsBroker)
-    alt Broker disponible
-        P->>B: RetiroSolicitado a cola.retiros.pendientes
-        P-->>C: 202 Accepted + solicitudId
-    else Broker caido o circuito abierto
-        P-->>C: 503 Service Unavailable (fallback)
-    end
-
-    B-->>Cons: @JmsListener (consumidores concurrentes)
-    Cons->>DB: retirar() en transaccion local
-    alt Saldo suficiente
-        Cons->>B: RetiroProcesado a cola.retiros.resultado
-    else Saldo insuficiente o cuenta inexistente
-        Cons->>B: RetiroRechazado a cola.retiros.resultado
-    else Error tecnico tras N reintentos
-        B->>B: mover mensaje a DLQ
-    end
-
-    B-->>P: @JmsListener de resultado
-    P->>P: guardar estado de la solicitud
-    C->>P: GET /api/atm/retiros/{solicitudId}
-    P-->>C: 200 con estado PENDIENTE, PROCESADO o RECHAZADO
-```
-
----
-
-## Novedades Semana 8: OAuth2.0, Docker y Docker Compose
-
-### 1. Seguridad con OAuth2.0
-Se creó el microservicio `auth-server` (**Spring Authorization Server**, puerto `9000`) que actúa como **Authorization Server**. Los tres BFF son **Resource Servers** que validan el JWT con la clave pública que publica `auth-server` (`/oauth2/jwks`) y exigen un *scope* por canal.
-
-| Client ID | Flujo | Scope | Acceso permitido |
+| Servicio | Rol | Puerto | Escalable |
 |---|---|---|---|
-| `web-client` | `client_credentials` | `web` | `bff-web` → `/api/web/**` |
-| `mobile-client` | `client_credentials` | `mobile` | `bff-mobile` → `/api/mobile/**` |
-| `atm-client` | `client_credentials` | `atm` | `bff-atm` → `/api/atm/**` |
+| `api-gateway` | Punto de entrada único **HTTPS**; enruta por path y balancea (`lb://`) entre réplicas | 8443 (público) | ✅ |
+| `bff-web` / `bff-mobile` / `bff-atm` | Un BFF por canal (respuesta completa / ligera / segura para cajero) | 8081 / 8082 / 8083 | ✅ |
+| `cuentas-service` | **Gestión de Cuentas**: apertura, cierre, mantenimiento, saldos y aplicación de movimientos | 8085 | ✅ (2 réplicas) |
+| `pagos-service` | **Procesamiento de Pagos**: pagos, transferencias y depósitos (saga + outbox) | 8087 | ✅ (2 réplicas) |
+| `clientes-service` | **Gestión de Clientes**: datos personales, perfil y nivel de riesgo | 8086 | ✅ |
+| `banco-xyz-core` | **3 jobs Spring Batch** de migración del legacy + API de reportes | 8443 (interno) | 1 instancia (batch) |
+| `auth-server` | Authorization Server OAuth2.0 (JWT) | 9000 | – |
+| `eureka-server` | Descubrimiento de servicios | 8761 | – |
+| `config-server` | Spring Cloud Config (configuración centralizada) | 8888 | – |
+| Apache Kafka (KRaft) | Bus de eventos | 9092 / 29092 | – |
+| PostgreSQL ×4 | Una base de datos **por servicio** (`bancoxyz`, `cuentas_db`, `clientes_db`, `pagos_db`) | 5432, 5435-5437 | – |
 
-- Los secretos se guardan cifrados con **bcrypt** en `auth-server/src/main/resources/application.yml`.
-- Access token: formato JWT (`self-contained`), vigencia **30 minutos**.
-- Sin token → `401`; token de otro canal (scope incorrecto) → `403`; secreto de cliente incorrecto → `401`.
-- El claim `iss` se fija con la variable `AUTH_ISSUER` y debe coincidir con `issuer-uri` del perfil `docker` de los BFF.
-- `banco-xyz-core` es un servicio interno: solo acepta llamadas de los BFF mediante la clave de servicio `internal.api-key`.
+## 2. Los cinco procesos clave identificados
 
-### 2. Dockerización de los microservicios
-Cada microservicio tiene su propio `Dockerfile` **multi-etapa**:
-1. **build**: `maven:3.9-eclipse-temurin-21` compila y empaqueta el `.jar`.
-2. **runtime**: `eclipse-temurin:21-jre-alpine` (solo JRE), ejecuta con usuario no-root.
-
-Cada carpeta incluye un `.dockerignore` (excluye `target/`, `.git/`, etc.) para que el build sea rápido y reproducible.
-Imágenes resultantes: `banco-xyz/eureka-server`, `config-server`, `auth-server`, `banco-xyz-core`, `bff-web`, `bff-mobile` y `bff-atm`.
-
-### 3. Orquestación con `docker-compose.yaml`
-Un solo archivo levanta **9 contenedores** en la red `banco-xyz-net`:
-
-| Servicio | Puerto | Depende de (healthy) |
+| # | Proceso del caso | Solución implementada |
 |---|---|---|
-| `banco-xyz-postgres` | 5432 | - |
-| `banco-xyz-artemis` | 61616 / 8161 | - |
-| `eureka-server` | 8761 | - |
-| `config-server` | 8888 | eureka-server |
-| `auth-server` | 9000 | - |
-| `banco-xyz-core` | 8443 | postgres, artemis, eureka, config |
-| `bff-web` | 8081 | config, eureka, auth, core |
-| `bff-mobile` | 8082 | config, eureka, auth, core |
-| `bff-atm` | 8083 | config, eureka, auth, artemis, core |
+| 1 | Procesos batch legacy (transacciones diarias, intereses mensuales, estados de cuenta anuales) | **Spring Batch**: 3 jobs particionados, con *retry*, *skip*, listeners, política de finalización de chunk y reinicio automático |
+| 2 | Backend monolítico → servicios independientes | **Microservicios** de Cuentas, Pagos y Clientes con base de datos propia |
+| 3 | Frontends acoplados al mismo backend | **Patrón BFF**: web, móvil y cajero independientes, con autenticación por canal |
+| 4 | Seguridad limitada y centralizada | **Seguridad distribuida**: OAuth2.0 + JWT, *resource server* en cada servicio, token relay, HTTPS en el borde |
+| 5 | Integración síncrona frágil entre módulos | **Mensajería asíncrona con Kafka** + **Resilience4j** (Circuit Breaker, Retry, fallbacks) |
 
-- Todos tienen **healthcheck** y `depends_on: condition: service_healthy`, por lo que el orden de arranque es automático.
-- Dentro de Docker los servicios se ubican por **nombre** (`eureka-server`, `config-server`, `auth-server`...). Esto se logra con el perfil `docker` (`SPRING_PROFILES_ACTIVE=docker`), cuyo archivo `config-server/src/main/resources/config-repo/application-docker.yml` entrega las URLs correctas; la conexión a PostgreSQL y Artemis se entrega por variables de entorno del compose.
-- El mismo código sigue funcionando **sin Docker** (perfil por defecto, `localhost`).
+## 3. Procesos batch (`banco-xyz-core`)
 
----
+| Job | Entrada | Resultado |
+|---|---|---|
+| `transaccionJob` | `transacciones.csv` | Reporte diario con detección de anomalías (monto alto, fecha futura, monto cero…) |
+| `cuentaInteresJob` | `intereses.csv` | Intereses mensuales por tipo de cuenta + **publicación de las cuentas migradas en Kafka** (`cuentas.migradas`) |
+| `cuentaAnualJob` | `cuentas_anuales.csv` | Estados de cuenta anuales para auditoría |
 
-## Cómo ejecutar el proyecto
+- **Paralelismo / volumen:** partición por rango de líneas (3 workers), chunk de 50 ítems, lectores sincronizados.
+- **Fallos temporales:** `retry` con *backoff* exponencial ante `TransientDataAccessException`.
+- **Datos inválidos:** `skip` con `CustomSkipPolicy` (límite configurable) y `BatchSkipListener` (auditoría de cada fila omitida).
+- **Política de finalización:** el chunk se confirma al llegar a 50 ítems **o** a los 5 s (`CompositeCompletionPolicy`).
+- **Reejecución automática:** `ResilientJobRunner` relanza con los mismos parámetros un job `FAILED` (hasta 3 intentos, *backoff* creciente); Spring Batch reinicia **solo desde el step/partición fallida**. `startLimit(5)` por step.
+- **Equivalencia con el legacy:** se aceptan los 4 formatos de fecha del archivo origen (`yyyy-MM-dd`, `yyyy/MM/dd`, `dd-MM-yyyy`, `dd/MM/yyyy`) para no descartar filas válidas.
 
-### Opción A (recomendada): todo con Docker Compose
-Requisitos: Docker Desktop (recomendado ≥ 6 GB de RAM asignados) y los puertos 5432, 61616, 8161, 8761, 8888, 9000, 8443 y 8081-8083 libres.
+## 4. Mensajería con Kafka
 
-```bash
-# Si existían contenedores de versiones anteriores, eliminarlos primero
-docker rm -f banco-xyz-postgres banco-xyz-artemis
+| Tópico | Productor | Consumidor(es) | Propósito |
+|---|---|---|---|
+| `cuentas.migradas` | banco-xyz-core | cuentas-service, clientes-service | Carga inicial desde el legacy (idempotente) |
+| `pagos.solicitados` | pagos-service | cuentas-service | Comando de pago/transferencia/depósito |
+| `pagos.resultado` | cuentas-service | pagos-service | Resultado `APLICADO` / `RECHAZADO` |
+| `retiros.solicitados` | bff-atm | cuentas-service | Retiro en cajero |
+| `retiros.resultado` | cuentas-service | bff-atm | Resultado del retiro |
+| `transacciones.completadas` | pagos-service | clientes-service | Evento de negocio: actualiza actividad del cliente |
+| `alertas.seguridad` | pagos-service | clientes-service | Monto alto u operación rechazada → nivel de riesgo |
+| `<tópico>.DLT` | (automático) | – | *Dead letter*: mensajes que agotaron los reintentos |
 
-docker compose up -d --build     # construye las 7 imágenes y levanta todo
-docker compose ps                # esperar a que todos estén "healthy" (2-4 min)
-docker compose logs -f banco-xyz-core   # (opcional) ver la ejecución de los 3 jobs batch
+3 particiones por tópico y grupos de consumo por servicio: al añadir réplicas, Kafka reparte las particiones entre ellas.
+
+## 5. Consistencia de datos en un entorno distribuido
+
+No hay transacciones distribuidas (2PC). Se usa una **saga coreografiada** con garantías explícitas:
+
+- **Transactional Outbox** (`pagos-service`): el pago se guarda antes de publicarse; si Kafka cae, `OutboxScheduler` lo reenvía.
+- **Idempotencia** (`cuentas-service`): tabla `operaciones_procesadas` por `solicitudId`. Una entrega duplicada nunca descuenta dos veces.
+- **Bloqueo pesimista** de cuentas (en orden de id → sin *deadlocks*) y `@Version` (bloqueo optimista).
+- **Transferencias atómicas:** origen y destino viven en el mismo servicio → una sola transacción local.
+- **Clave de idempotencia HTTP:** cabecera `Idempotency-Key` en los endpoints de pagos.
+- **Dead Letter Topic** + reintentos con *backoff* exponencial en todos los consumidores.
+
+## 6. Resiliencia (Resilience4j) y comportamientos alternativos
+
+| Llamada | Protección | Alternativa ante fallo |
+|---|---|---|
+| bff-* → cuentas-service | Retry + Circuit Breaker | HTTP **503** controlado (dato esencial) |
+| bff-web → clientes-service / core | Retry + Circuit Breaker | Respuesta **parcial** (`datosParciales: true`) |
+| bff-mobile → core | Retry + Circuit Breaker | Saldo sin movimientos recientes |
+| bff-atm → Kafka | Retry + Circuit Breaker | 503 con mensaje claro; el retiro no se pierde ni se duplica |
+| cuentas-service → clientes-service | Retry + Circuit Breaker | Cuenta en estado `PENDIENTE_VALIDACION` |
+| pagos-service → cuentas-service | Retry + Circuit Breaker | Se acepta y se valida de forma asíncrona |
+| pagos-service → Kafka | Retry + Circuit Breaker | Queda en **outbox** y se reenvía |
+
+Todas las llamadas HTTP además tienen *timeouts* (conexión 2 s, lectura 3 s).
+
+## 7. Seguridad
+
+- **Authorization Server** propio (Spring Authorization Server) con un cliente por canal: `web-client`, `mobile-client`, `atm-client` e `internal-client` (servicio a servicio).
+- Cada microservicio es **Resource Server**: valida firma (JWKS), emisor y **scope**. Lectura/escritura separadas por scope.
+- **Token relay:** los BFF reenvían el JWT del canal a los microservicios (propagación de identidad).
+- **HTTPS** en el API Gateway (TLS 1.2/1.3, PKCS12). En AWS lo termina el ALB (ACM).
+- Reglas propias del cajero: tope por retiro y múltiplos de 1.000.
+- Contenedores sin usuario root. Solo el gateway publica un puerto HTTPS hacia el exterior (más auth-server, Eureka y Config para administración local); `actuator` solo es alcanzable dentro de la red de Docker.
+
+## 8. Observabilidad
+
+`/actuator/health`, `/actuator/metrics`, `/actuator/circuitbreakers` y `/actuator/prometheus` en cada servicio; Prometheus opcional
+(`docker compose --profile monitoring up -d prometheus`, puerto 9090). Logs con el `solicitudId` de cada operación.
+
+## 9. Escalabilidad horizontal
+
+`docker compose up -d --build` levanta `cuentas-service` y `pagos-service` con 2 réplicas cada uno. Cualquier servicio sin puerto
+publicado se escala con `--scale` (ver [`instrucciones.md`](instrucciones.md)). El gateway reparte la carga con Spring Cloud LoadBalancer y
+Kafka reparte las particiones entre réplicas.
+
+## 10. Estructura del repositorio
+
+```
+api-gateway/  auth-server/  config-server/  eureka-server/
+banco-xyz-core/        # Spring Batch
+cuentas-service/  pagos-service/  clientes-service/
+bff-web/  bff-mobile/  bff-atm/
+infra/prometheus/  docs/img/
+docker-compose.yaml  readme.md  instrucciones.md  despliegue.md
 ```
 
-Verificar: Eureka `http://localhost:8761` debe mostrar `CONFIG-SERVER`, `BANCO-XYZ-CORE`, `BFF-WEB`, `BFF-MOBILE` y `BFF-ATM`. Consola de Artemis: `http://localhost:8161`.
+## 11. Tecnologías
 
-Detener: `docker compose down` (agregar `-v` para borrar también la base de datos).
+Java 21 · Spring Boot 4.1 · Spring Cloud 2025.1 (Config, Eureka, LoadBalancer, Gateway) · Spring Batch · Spring Security / Authorization Server ·
+Spring Kafka · Resilience4j · JPA/Hibernate · PostgreSQL 16 · Apache Kafka 3.9 (KRaft) · Docker / Docker Compose · Micrometer + Prometheus.
 
-### Opción B: ejecución local (sin Docker para los microservicios)
-```bash
-docker compose up -d banco-xyz-postgres banco-xyz-artemis   # solo infraestructura
-```
-Luego, cada servicio en su propia terminal y en este orden (esperar a que cada uno arranque):
-```bash
-cd eureka-server  && ./mvnw spring-boot:run
-cd config-server  && ./mvnw spring-boot:run
-cd auth-server    && ./mvnw spring-boot:run
-cd banco-xyz-core && ./mvnw spring-boot:run
-cd bff-web        && ./mvnw spring-boot:run
-cd bff-mobile     && ./mvnw spring-boot:run
-cd bff-atm        && ./mvnw spring-boot:run
-```
+## 12. Limitaciones conocidas
 
----
-
-## Pruebas (evidencia de ejecución)
-
-Las capturas están en `Evidencias.docx`. Para reproducirlas (`curl` en Linux/Mac/Git Bash; en PowerShell usar `curl.exe`):
-
-**OAuth2.0**
-```bash
-# 1) Obtener token del cajero (200 + access_token, scope "atm")
-curl -s -u atm-client:<secreto> -d "grant_type=client_credentials&scope=atm" http://localhost:9000/oauth2/token
-
-# 2) Usar el token válido (200)
-curl -i -H "Authorization: Bearer <TOKEN>" http://localhost:8083/api/atm/cuentas/101/saldo
-
-# 3) Sin token (401)
-curl -i http://localhost:8083/api/atm/cuentas/101/saldo
-
-# 4) Token del cajero contra el BFF web (403)
-curl -i -H "Authorization: Bearer <TOKEN_ATM>" http://localhost:8081/api/web/transacciones
-
-# 5) Secreto incorrecto (401)
-curl -i -u atm-client:incorrecto -d "grant_type=client_credentials&scope=atm" http://localhost:9000/oauth2/token
-```
-Igual para `web-client` (`:8081/api/web/...`) y `mobile-client` (`:8082/api/mobile/cuentas/{id}`).
-
-**Mensajería asíncrona (JMS)**
-```bash
-# Enviar retiro -> 202 Accepted + solicitudId
-curl -i -X POST -H "Authorization: Bearer <TOKEN_ATM>" -H "Content-Type: application/json" \
-     -d '{"monto": 1000}' http://localhost:8083/api/atm/cuentas/101/retiro
-
-# Consultar el resultado final (PENDIENTE / PROCESADO / RECHAZADO)
-curl -s -H "Authorization: Bearer <TOKEN_ATM>" http://localhost:8083/api/atm/retiros/<solicitudId>
-```
-
-**Tolerancia a fallos (Resilience4j)**
-```bash
-docker compose stop banco-xyz-core        # simular caída del core
-# repetir 5+ veces una consulta con token válido -> respuesta 503 controlada (fallback)
-curl -i -H "Authorization: Bearer <TOKEN_ATM>" http://localhost:8083/api/atm/cuentas/101/saldo
-curl -s http://localhost:8083/actuator/circuitbreakers     # estado del circuito: OPEN
-docker compose start banco-xyz-core       # tras ~10 s pasa a HALF_OPEN y luego CLOSED
-
-docker compose stop banco-xyz-artemis     # simular caída del broker
-# POST de retiro -> 503 (fallback del circuito "jmsBroker")
-docker compose start banco-xyz-artemis
-```
+- Estado de retiros del cajero en memoria (con varias réplicas de `bff-atm`, la consulta ocurre en la réplica que recibió el retiro o tras recibir el resultado); en producción iría a Redis.
+- Kafka de un solo broker y sin autenticación (válido para desarrollo; en AWS se usa MSK con TLS/IAM).
+- `banco-xyz-core` debe ejecutarse en **una** instancia (los jobs corren al arrancar; `batch.run-on-startup=false` para desactivarlo).
+- Certificado TLS autofirmado solo para desarrollo.

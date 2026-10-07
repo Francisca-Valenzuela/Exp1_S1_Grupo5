@@ -5,35 +5,44 @@ spring:
   application:
     name: bff-atm
 
-core:
-  service-id: banco-xyz-core
+services:
+  cuentas: cuentas-service
+
+# Reglas de seguridad propias del canal Cajero
+atm:
+  retiro:
+    monto-maximo: 500000     # tope por operación
+    multiplo: 1000           # el cajero solo entrega billetes de 1.000 o más
 
 resilience4j:
   circuitbreaker:
-    instances:
-      coreService:
+    configs:
+      default:
         sliding-window-size: 10
         minimum-number-of-calls: 5
         failure-rate-threshold: 50
         wait-duration-in-open-state: 10s
         permitted-number-of-calls-in-half-open-state: 3
         automatic-transition-from-open-to-half-open-enabled: true
-      jmsBroker:
-        sliding-window-size: 10
-        minimum-number-of-calls: 5
-        failure-rate-threshold: 50
-        wait-duration-in-open-state: 10s
-        permitted-number-of-calls-in-half-open-state: 3
-        automatic-transition-from-open-to-half-open-enabled: true
-  timelimiter:
+        ignore-exceptions:
+          - java.util.NoSuchElementException
+          - java.lang.IllegalArgumentException
     instances:
-      coreService:
-        timeout-duration: 3s
+      cuentasService:
+        base-config: default
+      kafkaBroker:
+        base-config: default
   retry:
-    instances:
-      coreService:
+    configs:
+      default:
         max-attempts: 2
         wait-duration: 500ms
-      jmsBroker:
+        ignore-exceptions:
+          - java.util.NoSuchElementException
+          - java.lang.IllegalArgumentException
+    instances:
+      cuentasService:
+        base-config: default
+      kafkaBroker:
+        base-config: default
         max-attempts: 3
-        wait-duration: 500ms

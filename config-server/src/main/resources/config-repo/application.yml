@@ -1,6 +1,4 @@
-# Configuración COMÚN a todos los microservicios que consultan el Config
-# Server (banco-xyz-core, bff-web, bff-mobile, bff-atm). Cada uno puede
-# sobrescribir estos valores en su propio <spring.application.name>.yml.
+# Configuración COMÚN a todos los microservicios (se combina con <spring.application.name>.yml).
 
 eureka:
   client:
@@ -13,18 +11,21 @@ eureka:
     lease-renewal-interval-in-seconds: 10
     lease-expiration-duration-in-seconds: 30
 
+# Monitoreo: health (healthcheck de Docker), métricas, formato Prometheus y estado de los circuit breakers.
 management:
   endpoints:
     web:
       exposure:
-        include: health,info,circuitbreakers
+        include: health,info,metrics,prometheus,circuitbreakers,circuitbreakerevents
   endpoint:
     health:
-      show-details: always
+      show-details: never
+  health:
+    circuitbreakers:
+      enabled: true
 
-# Validación de tokens OAuth2.0 (Resource Server) en los 3 BFF.
-# jwk-set-uri: clave pública que publica auth-server.
-# issuer-uri: se usa solo para validar el claim "iss" (no hace discovery al arrancar).
+# Seguridad distribuida: todos los servicios son Resource Servers y validan los JWT de auth-server.
+# jwk-set-uri: clave pública de auth-server. issuer-uri: solo valida el claim "iss" (sin discovery al arrancar).
 spring:
   security:
     oauth2:
@@ -32,9 +33,15 @@ spring:
         jwt:
           issuer-uri: http://localhost:9000
           jwk-set-uri: http://localhost:9000/oauth2/jwks
-
-# Clave compartida simple para las llamadas internas BFF -> core
-# (autenticación de servicio a servicio).
-internal:
-  api-key: banco-xyz-internal-2026
-
+  # Apache Kafka (valores por defecto para ejecución local fuera de Docker)
+  kafka:
+    bootstrap-servers: localhost:29092
+    producer:
+      acks: all
+    consumer:
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+    listener:
+      ack-mode: record
+      concurrency: 3
+      missing-topics-fatal: false

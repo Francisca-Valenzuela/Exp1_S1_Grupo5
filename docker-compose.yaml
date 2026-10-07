@@ -1,11 +1,15 @@
 # =============================================================================
-# Banco XYZ - Orquestación completa (Semana 8)
-# Levanta infraestructura + Spring Cloud + seguridad OAuth2 + microservicios:
+# Banco XYZ - Orquestación completa (Evaluación Final Transversal, Semana 9)
 #
 #   docker compose up -d --build
 #
+# Escalabilidad horizontal: cuentas-service y pagos-service arrancan con 2 réplicas
+# (deploy.replicas). Cualquier servicio sin puerto publicado se puede escalar:
+#   docker compose up -d --scale bff-web=3 --scale clientes-service=2
+# Punto de entrada único: API Gateway en https://localhost:8443 (reparte entre réplicas).
+#
 # Orden de arranque (depends_on + healthcheck):
-#   postgres / artemis / eureka -> config-server -> auth-server -> core -> BFFs
+#   bases de datos / kafka / eureka -> config-server -> auth-server -> core -> microservicios -> BFFs -> gateway
 # =============================================================================
 name: banco-xyz
 
@@ -19,9 +23,45 @@ x-healthcheck: &hc
   retries: 15
   start_period: 40s
 
+x-docker-env: &docker-env
+  SPRING_PROFILES_ACTIVE: docker
+  SPRING_CONFIG_IMPORT: "configserver:http://config-server:8888"
+
+x-cloud-deps: &cloud-deps
+  config-server:
+    condition: service_healthy
+  eureka-server:
+    condition: service_healthy
+
 services:
   # ---------------------------- Infraestructura ----------------------------
-  banco-xyz-postgres:
+  kafka:
+    image: apache/kafka:3.9.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    ports:
+      - "29092:29092"      # acceso desde el host (ejecución local sin Docker)
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    networks: [banco-xyz-net]
+
+  banco-xyz-postgres:          # BD del core (batch + reportes)
     image: postgres:16
     environment:
       POSTGRES_DB: bancoxyz
@@ -38,24 +78,63 @@ services:
       retries: 10
     networks: [banco-xyz-net]
 
-  banco-xyz-artemis:
-    image: apache/activemq-artemis:latest-alpine
+  # Database-per-service: cada microservicio es dueño de su propia base de datos
+  cuentas-db:
+    image: postgres:16
     environment:
-      ARTEMIS_USER: bancoxyz
-      ARTEMIS_PASSWORD: bancoxyz123
+      POSTGRES_DB: cuentas_db
+      POSTGRES_USER: cuentas
+      POSTGRES_PASSWORD: cuentas123
     ports:
-      - "61616:61616"
-      - "8161:8161"
+      - "5435:5432"
+    volumes:
+      - cuentas-db-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 61616 || exit 1"]
-      <<: *hc
+      test: ["CMD-SHELL", "pg_isready -U cuentas -d cuentas_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [banco-xyz-net]
+
+  clientes-db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: clientes_db
+      POSTGRES_USER: clientes
+      POSTGRES_PASSWORD: clientes123
+    ports:
+      - "5436:5432"
+    volumes:
+      - clientes-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clientes -d clientes_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [banco-xyz-net]
+
+  pagos-db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: pagos_db
+      POSTGRES_USER: pagos
+      POSTGRES_PASSWORD: pagos123
+    ports:
+      - "5437:5432"
+    volumes:
+      - pagos-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pagos -d pagos_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     networks: [banco-xyz-net]
 
   # ------------------------------ Spring Cloud -----------------------------
   eureka-server:
     <<: *java-service
     build: ./eureka-server
-    image: banco-xyz/eureka-server:1.0
+    image: banco-xyz/eureka-server:2.0
     ports:
       - "8761:8761"
     healthcheck:
@@ -65,10 +144,8 @@ services:
   config-server:
     <<: *java-service
     build: ./config-server
-    image: banco-xyz/config-server:1.0
+    image: banco-xyz/config-server:2.0
     environment:
-      # El config-server usa el backend "native"; el perfil "docker" lo piden
-      # los clientes (aquí NO se activa para no pisar "native").
       SPRING_PROFILES_ACTIVE: native
       EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
     ports:
@@ -84,9 +161,8 @@ services:
   auth-server:
     <<: *java-service
     build: ./auth-server
-    image: banco-xyz/auth-server:1.0
+    image: banco-xyz/auth-server:2.0
     environment:
-      # Claim "iss" de los tokens; debe coincidir con issuer-uri de los BFF
       AUTH_ISSUER: http://auth-server:9000
     ports:
       - "9000:9000"
@@ -95,49 +171,97 @@ services:
       <<: *hc
 
   # ------------------------------ Microservicios ---------------------------
-  banco-xyz-core:
+  banco-xyz-core:                # Spring Batch: ejecutar UNA sola instancia (los jobs corren al arrancar)
     <<: *java-service
     build: ./banco-xyz-core
-    image: banco-xyz/banco-xyz-core:1.0
+    image: banco-xyz/banco-xyz-core:2.0
     environment:
-      SPRING_PROFILES_ACTIVE: docker
-      SPRING_CONFIG_IMPORT: "configserver:http://config-server:8888"
+      <<: *docker-env
       SPRING_DATASOURCE_URL: jdbc:postgresql://banco-xyz-postgres:5432/bancoxyz
-      SPRING_ARTEMIS_BROKER_URL: tcp://banco-xyz-artemis:61616
-    ports:
-      - "8443:8443"
     depends_on:
+      <<: *cloud-deps
       banco-xyz-postgres:
         condition: service_healthy
-      banco-xyz-artemis:
-        condition: service_healthy
-      eureka-server:
-        condition: service_healthy
-      config-server:
+      kafka:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8443/actuator/health || exit 1"]
       <<: *hc
-      start_period: 90s
+      start_period: 120s
 
+  cuentas-service:
+    <<: *java-service
+    build: ./cuentas-service
+    image: banco-xyz/cuentas-service:2.0
+    environment:
+      <<: *docker-env
+      SPRING_DATASOURCE_URL: jdbc:postgresql://cuentas-db:5432/cuentas_db
+      SPRING_DATASOURCE_USERNAME: cuentas
+      SPRING_DATASOURCE_PASSWORD: cuentas123
+    deploy:
+      replicas: 2                # escalabilidad horizontal (sin puerto publicado para poder replicar)
+    depends_on:
+      <<: *cloud-deps
+      cuentas-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8085/actuator/health || exit 1"]
+      <<: *hc
+
+  clientes-service:
+    <<: *java-service
+    build: ./clientes-service
+    image: banco-xyz/clientes-service:2.0
+    environment:
+      <<: *docker-env
+      SPRING_DATASOURCE_URL: jdbc:postgresql://clientes-db:5432/clientes_db
+      SPRING_DATASOURCE_USERNAME: clientes
+      SPRING_DATASOURCE_PASSWORD: clientes123
+    deploy:
+      replicas: 1
+    depends_on:
+      <<: *cloud-deps
+      clientes-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8086/actuator/health || exit 1"]
+      <<: *hc
+
+  pagos-service:
+    <<: *java-service
+    build: ./pagos-service
+    image: banco-xyz/pagos-service:2.0
+    environment:
+      <<: *docker-env
+      SPRING_DATASOURCE_URL: jdbc:postgresql://pagos-db:5432/pagos_db
+      SPRING_DATASOURCE_USERNAME: pagos
+      SPRING_DATASOURCE_PASSWORD: pagos123
+    deploy:
+      replicas: 2
+    depends_on:
+      <<: *cloud-deps
+      pagos-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8087/actuator/health || exit 1"]
+      <<: *hc
+
+  # ----------------------------------- BFFs --------------------------------
   bff-web:
     <<: *java-service
     build: ./bff-web
-    image: banco-xyz/bff-web:1.0
-    environment:
-      SPRING_PROFILES_ACTIVE: docker
-      SPRING_CONFIG_IMPORT: "configserver:http://config-server:8888"
-    ports:
-      - "8081:8081"
+    image: banco-xyz/bff-web:2.0
+    environment: *docker-env
     depends_on:
-      config-server:
-        condition: service_healthy
-      eureka-server:
-        condition: service_healthy
+      <<: *cloud-deps
       auth-server:
         condition: service_healthy
-      banco-xyz-core:
-        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8081/actuator/health || exit 1"]
       <<: *hc
@@ -145,21 +269,12 @@ services:
   bff-mobile:
     <<: *java-service
     build: ./bff-mobile
-    image: banco-xyz/bff-mobile:1.0
-    environment:
-      SPRING_PROFILES_ACTIVE: docker
-      SPRING_CONFIG_IMPORT: "configserver:http://config-server:8888"
-    ports:
-      - "8082:8082"
+    image: banco-xyz/bff-mobile:2.0
+    environment: *docker-env
     depends_on:
-      config-server:
-        condition: service_healthy
-      eureka-server:
-        condition: service_healthy
+      <<: *cloud-deps
       auth-server:
         condition: service_healthy
-      banco-xyz-core:
-        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8082/actuator/health || exit 1"]
       <<: *hc
@@ -167,27 +282,41 @@ services:
   bff-atm:
     <<: *java-service
     build: ./bff-atm
-    image: banco-xyz/bff-atm:1.0
-    environment:
-      SPRING_PROFILES_ACTIVE: docker
-      SPRING_CONFIG_IMPORT: "configserver:http://config-server:8888"
-      SPRING_ARTEMIS_BROKER_URL: tcp://banco-xyz-artemis:61616
-    ports:
-      - "8083:8083"
+    image: banco-xyz/bff-atm:2.0
+    environment: *docker-env
     depends_on:
-      config-server:
-        condition: service_healthy
-      eureka-server:
-        condition: service_healthy
+      <<: *cloud-deps
       auth-server:
         condition: service_healthy
-      banco-xyz-artemis:
+      kafka:
         condition: service_healthy
-      banco-xyz-core:
-        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8083/actuator/health || exit 1"]
       <<: *hc
+
+  # ------------------------- Punto de entrada único ------------------------
+  api-gateway:
+    <<: *java-service
+    build: ./api-gateway
+    image: banco-xyz/api-gateway:2.0
+    environment: *docker-env
+    ports:
+      - "8443:8443"        # HTTPS (certificado autofirmado): https://localhost:8443
+    depends_on:
+      <<: *cloud-deps
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8090/actuator/health || exit 1"]
+      <<: *hc
+
+  # --------------------------- Monitoreo (opcional) ------------------------
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: ["monitoring"]
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    networks: [banco-xyz-net]
 
 networks:
   banco-xyz-net:
@@ -195,3 +324,6 @@ networks:
 
 volumes:
   banco-xyz-postgres-data:
+  cuentas-db-data:
+  clientes-db-data:
+  pagos-db-data:

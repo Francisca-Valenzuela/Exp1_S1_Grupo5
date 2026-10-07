@@ -1,6 +1,7 @@
 package com.duoc.bancoxyzbatch.config;
 
 import com.duoc.bancoxyzbatch.batch.BatchJobListener;
+import com.duoc.bancoxyzbatch.batch.BatchPolicies;
 import com.duoc.bancoxyzbatch.batch.BatchSkipListener;
 import com.duoc.bancoxyzbatch.batch.BatchStepListener;
 import com.duoc.bancoxyzbatch.batch.CustomSkipPolicy;
@@ -70,10 +71,13 @@ public class TransaccionJobConfig {
                                        ItemWriter<TransaccionEntity> transaccionItemWriter,
                                        CustomSkipPolicy customSkipPolicy,
                                        BatchSkipListener batchSkipListener,
-                                       BatchStepListener batchStepListener) {
+                                       BatchStepListener batchStepListener,
+                                       @Value("${batch.chunk-size:50}") int chunkSize,
+                                       @Value("${batch.chunk-timeout-ms:5000}") long chunkTimeoutMs) {
 
         return new StepBuilder("transaccionWorkerStep", jobRepository)
-                .<TransaccionCsv, TransaccionEntity>chunk(5, transactionManager)
+                .startLimit(5)   // maximo de reinicios del step antes de requerir atencion manual
+                .<TransaccionCsv, TransaccionEntity>chunk(BatchPolicies.finalizacionDeChunk(chunkSize, chunkTimeoutMs), transactionManager)
                 .reader(transaccionItemReader)
                 .processor(transaccionProcessor)
                 .writer(transaccionItemWriter)

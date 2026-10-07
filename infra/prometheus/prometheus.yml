@@ -1,0 +1,30 @@
+# Prometheus opcional (perfil "monitoring"):  docker compose --profile monitoring up -d prometheus
+# Usa el DNS de Docker: el nombre de un servicio resuelve a TODAS sus replicas, asi que se descubren solas.
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: cuentas-service
+    metrics_path: /actuator/prometheus
+    dns_sd_configs: [{names: [cuentas-service], type: A, port: 8085}]
+  - job_name: clientes-service
+    metrics_path: /actuator/prometheus
+    dns_sd_configs: [{names: [clientes-service], type: A, port: 8086}]
+  - job_name: pagos-service
+    metrics_path: /actuator/prometheus
+    dns_sd_configs: [{names: [pagos-service], type: A, port: 8087}]
+  - job_name: banco-xyz-core
+    metrics_path: /actuator/prometheus
+    dns_sd_configs: [{names: [banco-xyz-core], type: A, port: 8443}]
+  - job_name: bff-web
+    metrics_path: /actuator/prometheus
+    dns_sd_configs: [{names: [bff-web], type: A, port: 8081}]
+  - job_name: bff-mobile
+    metrics_path: /actuator/prometheus
+    dns_sd_configs: [{names: [bff-mobile], type: A, port: 8082}]
+  - job_name: bff-atm
+    metrics_path: /actuator/prometheus
+    dns_sd_configs: [{names: [bff-atm], type: A, port: 8083}]
+  - job_name: api-gateway
+    metrics_path: /actuator/prometheus
+    dns_sd_configs: [{names: [api-gateway], type: A, port: 8090}]

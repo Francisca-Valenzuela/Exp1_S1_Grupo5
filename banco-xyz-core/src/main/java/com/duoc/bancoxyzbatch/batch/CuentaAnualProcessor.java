@@ -1,7 +1,6 @@
 package com.duoc.bancoxyzbatch.batch;
 
 import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -16,8 +15,6 @@ public class CuentaAnualProcessor implements ItemProcessor<CuentaAnualCsv, Cuent
 
     private static final Logger log = LoggerFactory.getLogger(CuentaAnualProcessor.class);
 
-    private static final DateTimeFormatter FORMATO_ISO = DateTimeFormatter.ofPattern("yyyy-MM-dd");
-    private static final DateTimeFormatter FORMATO_LEGACY = DateTimeFormatter.ofPattern("yyyy/MM/dd");
 
     @Override
     public CuentaAnualEntity process(CuentaAnualCsv item) {
@@ -43,18 +40,6 @@ public class CuentaAnualProcessor implements ItemProcessor<CuentaAnualCsv, Cuent
     }
 
     private LocalDate parseFecha(String fechaRaw) {
-        String fecha = fechaRaw != null ? fechaRaw.trim() : null;
-        if (fecha == null || fecha.isBlank()) {
-            throw new DatoInvalidoException("Fecha nula en registro de cuenta anual");
-        }
-        try {
-            return LocalDate.parse(fecha, FORMATO_ISO);
-        } catch (Exception e1) {
-            try {
-                return LocalDate.parse(fecha, FORMATO_LEGACY);
-            } catch (Exception e2) {
-                throw new DatoInvalidoException("Fecha con formato irreconocible: " + fecha, e2);
-            }
-        }
+        return FechaParser.parse(fechaRaw, "cuenta anual");
     }
 }

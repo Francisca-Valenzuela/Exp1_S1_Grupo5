@@ -1,0 +1,79 @@
+# HTTPS en el borde: todo el tráfico externo entra cifrado por el gateway (TLS 1.2+).
+# El certificado es autofirmado (solo desarrollo). En AWS el TLS lo termina el ALB con un certificado de ACM.
+server:
+  port: 8443
+  ssl:
+    enabled: true
+    key-store: classpath:keystore.p12
+    key-store-type: PKCS12
+    key-store-password: ${GATEWAY_KEYSTORE_PASSWORD:changeit}
+    key-alias: gateway
+    enabled-protocols: TLSv1.3,TLSv1.2
+
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      server:
+        webflux:
+          # Enrutamiento por path hacia servicios de Eureka (lb:// = balanceo de carga entre replicas)
+          routes:
+            - id: bff-web
+              uri: lb://bff-web
+              predicates:
+                - Path=/api/web/**
+              filters:
+                - name: Retry
+                  args:
+                    retries: 2
+                    methods: GET
+                    statuses: BAD_GATEWAY,SERVICE_UNAVAILABLE
+            - id: bff-mobile
+              uri: lb://bff-mobile
+              predicates:
+                - Path=/api/mobile/**
+              filters:
+                - name: Retry
+                  args:
+                    retries: 2
+                    methods: GET
+                    statuses: BAD_GATEWAY,SERVICE_UNAVAILABLE
+            - id: bff-atm
+              uri: lb://bff-atm
+              predicates:
+                - Path=/api/atm/**
+            - id: cuentas-service
+              uri: lb://cuentas-service
+              predicates:
+                - Path=/api/cuentas/**
+              filters:
+                - name: Retry
+                  args:
+                    retries: 2
+                    methods: GET
+                    statuses: BAD_GATEWAY,SERVICE_UNAVAILABLE
+            - id: clientes-service
+              uri: lb://clientes-service
+              predicates:
+                - Path=/api/clientes/**
+              filters:
+                - name: Retry
+                  args:
+                    retries: 2
+                    methods: GET
+                    statuses: BAD_GATEWAY,SERVICE_UNAVAILABLE
+            - id: pagos-service
+              uri: lb://pagos-service
+              predicates:
+                - Path=/api/pagos/**
+
+management:
+  server:
+    port: 8090        # actuator en HTTP y puerto aparte (healthcheck de Docker / Prometheus)
+    ssl:
+      enabled: false
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,gateway

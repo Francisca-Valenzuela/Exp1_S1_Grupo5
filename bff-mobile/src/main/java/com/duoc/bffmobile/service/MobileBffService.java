@@ -2,52 +2,46 @@ package com.duoc.bffmobile.service;
 
 import java.util.Comparator;
 import java.util.List;
-import java.util.stream.Collectors;
+import java.util.Objects;
 
 import org.springframework.stereotype.Service;
 
 import com.duoc.bffmobile.client.CoreClient;
+import com.duoc.bffmobile.client.CuentaServiceDTO;
+import com.duoc.bffmobile.client.CuentasClient;
 import com.duoc.bffmobile.dto.CuentaCoreDTO;
 import com.duoc.bffmobile.dto.CuentaMobileDTO;
 import com.duoc.bffmobile.dto.MovimientoCoreDTO;
 import com.duoc.bffmobile.dto.MovimientoMobileDTO;
-import com.duoc.bffmobile.exception.CoreNoDisponibleException;
-
-import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
-import io.github.resilience4j.retry.annotation.Retry;
 
 @Service
 public class MobileBffService {
 
-    // Cantidad de movimientos recientes que se envian al movil, para no
-    // sobrecargar la app con el historial completo del ano.
+    // Solo los movimientos recientes viajan al movil (no el historial completo del ano)
     private static final int MAX_MOVIMIENTOS_RECIENTES = 5;
 
+    private final CuentasClient cuentasClient;
     private final CoreClient coreClient;
 
-    public MobileBffService(CoreClient coreClient) {
+    public MobileBffService(CuentasClient cuentasClient, CoreClient coreClient) {
+        this.cuentasClient = cuentasClient;
         this.coreClient = coreClient;
     }
 
-    @Retry(name = "coreService")
-    @CircuitBreaker(name = "coreService", fallbackMethod = "obtenerCuentaFallback")
     public CuentaMobileDTO obtenerCuenta(Long cuentaId) {
-        CuentaCoreDTO cuenta = coreClient.obtenerCuenta(cuentaId);
+        CuentaServiceDTO cuenta = cuentasClient.obtener(cuentaId);   // esencial: saldo actual
+        CuentaCoreDTO legacy = coreClient.obtenerCuenta(cuentaId);   // opcional: nombre + historial
 
-        List<MovimientoMobileDTO> recientes = cuenta.getMovimientos() == null
+        List<MovimientoMobileDTO> recientes = legacy == null || legacy.getMovimientos() == null
                 ? List.of()
-                : cuenta.getMovimientos().stream()
+                : legacy.getMovimientos().stream()
+                        .filter(m -> m.getFecha() != null)
                         .sorted(Comparator.comparing(MovimientoCoreDTO::getFecha).reversed())
                         .limit(MAX_MOVIMIENTOS_RECIENTES)
                         .map(m -> new MovimientoMobileDTO(m.getFecha(), m.getMonto(), m.getDescripcion()))
-                        .collect(Collectors.toList());
+                        .toList();
 
-        return new CuentaMobileDTO(cuenta.getCuentaId(), cuenta.getNombre(), cuenta.getSaldoFinal(), recientes);
-    }
-
-    @SuppressWarnings("unused")
-    private CuentaMobileDTO obtenerCuentaFallback(Long cuentaId, Throwable ex) {
-        throw new CoreNoDisponibleException(
-                "El servicio de cuentas no esta disponible en este momento. Intenta nuevamente en unos segundos.");
+        String nombre = legacy == null ? null : legacy.getNombre();
+        return new CuentaMobileDTO(Objects.requireNonNull(cuenta.getCuentaId()), nombre, cuenta.getSaldo(), recientes);
     }
 }

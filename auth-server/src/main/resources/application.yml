@@ -49,3 +49,17 @@ spring:
             token:
               access-token-format: self-contained
               access-token-time-to-live: 30m
+          # Cliente de servicio a servicio (batch, tareas de operaciones, pruebas de integracion)
+          internal-client:
+            registration:
+              client-id: internal-client
+              client-secret: "{bcrypt}$2a$10$Obta5ASZjRWakN/hyTolXezQZOlOs2k2PCAcNHKi5BcUdeIfeIC26"
+              client-authentication-methods:
+                - client_secret_basic
+              authorization-grant-types:
+                - client_credentials
+              scopes:
+                - internal
+            token:
+              access-token-format: self-contained
+              access-token-time-to-live: 30m

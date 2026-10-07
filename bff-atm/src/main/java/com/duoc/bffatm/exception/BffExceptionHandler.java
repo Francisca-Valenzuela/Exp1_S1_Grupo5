@@ -19,11 +19,6 @@ public class BffExceptionHandler {
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(buildBody(ex.getMessage()));
     }
 
-    @ExceptionHandler(SaldoInsuficienteException.class)
-    public ResponseEntity<Object> handleSaldoInsuficiente(SaldoInsuficienteException ex) {
-        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body(buildBody(ex.getMessage()));
-    }
-
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<Object> handleIllegalArgument(IllegalArgumentException ex) {
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(buildBody(ex.getMessage()));
